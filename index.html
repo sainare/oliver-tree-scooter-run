@@ -1,4 +1,29 @@
-<html lang="en-us"><script src="https://pygame-web.github.io/cdn/0.9.3/pythons.js" type=module id="site" data-python="python3.12" data-LINES=42 data-COLUMNS=132 data-os="vtx,snd,gui" async defer>#<!--
+<html lang="en-us"><script>(function () {
+  var list = window.__otAC = [];
+  ['AudioContext', 'webkitAudioContext'].forEach(function (n) {
+    var C = window[n]; if (!C) return;
+    var W = function (o) { var c = o ? new C(o) : new C(); list.push(c); return c; };
+    W.prototype = C.prototype; window[n] = W;
+  });
+  // звук разрешён после первого касания или клавиши (правило автовоспроизведения)
+  var unlocked = false;
+  function unlock() {
+    unlocked = true;
+    list.forEach(function (c) { try { if (c.state === 'suspended') c.resume(); } catch (e) {} });
+  }
+  ['pointerdown', 'touchend', 'click', 'keydown'].forEach(function (ev) {
+    window.addEventListener(ev, unlock, true);
+  });
+  // вкладка в фоне: музыки быть не должно
+  document.addEventListener('visibilitychange', function () {
+    list.forEach(function (c) {
+      try {
+        if (document.hidden) c.suspend();
+        else if (unlocked) c.resume();
+      } catch (e) {}
+    });
+  });
+})();</script><script src="splash/splash.js"></script><script src="https://pygame-web.github.io/cdn/0.9.3/pythons.js" type=module id="site" data-python="python3.12" data-LINES=42 data-COLUMNS=132 data-os="vtx,snd,gui" async defer>#<!--
 
 print("""
 Loading olivertreemobile from olivertreemobile.apk
@@ -149,7 +174,7 @@ config = {
     user_canvas : 0,
     user_canvas_managed : 0,
     gui_divider : 2,
-    ume_block : 1,
+    ume_block : 0,
     can_close : 0,
     archive : "olivertreemobile",
     gui_debug : 2,
