@@ -1,4 +1,15 @@
 <html lang="en-us"><script>(function () {
+  // pygbag при старте без касания пытается проиграть «пустой» звук и, получив
+  // отказ браузера, показывает alert. Звук мы разблокируем сами по первому
+  // касанию, поэтому это сообщение гасим (остальные alert не трогаем).
+  var nativeAlert = window.alert;
+  window.alert = function (msg) {
+    if (String(msg).indexOf('Rejection occurred') === 0) {
+      console.log('OT_ALERT_SUPPRESSED ' + msg);
+      return;
+    }
+    return nativeAlert.apply(window, arguments);
+  };
   var Orig = window.AudioContext || window.webkitAudioContext;
   window.__otOrigAC = Orig;
   var list = window.__otAC = [];
@@ -121,7 +132,7 @@
     });
     if (document.hidden) window.otMusic.bgPause(); else window.otMusic.bgResume();
   });
-})();</script><script src="splash/splash.js?v=1790840543"></script><script src="https://pygame-web.github.io/cdn/0.9.3/pythons.js" type=module id="site" data-python="python3.12" data-LINES=42 data-COLUMNS=132 data-os="vtx,snd,gui" async defer>#<!--
+})();</script><script src="splash/splash.js?v=1790840838"></script><script src="https://pygame-web.github.io/cdn/0.9.3/pythons.js" type=module id="site" data-python="python3.12" data-LINES=42 data-COLUMNS=132 data-os="vtx,snd,gui" async defer>#<!--
 
 print("""
 Loading olivertreemobile from olivertreemobile.apk
