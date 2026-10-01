@@ -1,20 +1,117 @@
 <html lang="en-us"><script>(function () {
+  var Orig = window.AudioContext || window.webkitAudioContext;
+  window.__otOrigAC = Orig;
   var list = window.__otAC = [];
   ['AudioContext', 'webkitAudioContext'].forEach(function (n) {
     var C = window[n]; if (!C) return;
     var W = function (o) { var c = o ? new C(o) : new C(); list.push(c); return c; };
     W.prototype = C.prototype; window[n] = W;
   });
-  // звук разрешён после первого касания или клавиши (правило автовоспроизведения)
-  var unlocked = false;
+
+  var ctx = null, master = null, src = null, cur = null, want = null;
+  var buffers = {}, loading = {}, order = [];
+  var level = 1, userPaused = false, bgPaused = false;
+
+  function ensure() {
+    if (ctx || !Orig) return !!ctx;
+    try {
+      ctx = new Orig();
+      master = ctx.createGain();
+      master.gain.value = level;
+      master.connect(ctx.destination);
+    } catch (e) { ctx = null; console.log('OT_MUSIC_ERR ctx ' + e); }
+    return !!ctx;
+  }
+  function apply() {                 // контекст идёт, только если нет паузы
+    if (!ctx) return;
+    try {
+      if (userPaused || bgPaused) {
+        if (ctx.state === 'running') ctx.suspend();
+      } else if (ctx.state === 'suspended') {
+        var p = ctx.resume(); if (p && p.catch) p.catch(function () {});
+      }
+    } catch (e) {}
+  }
+  function trim() {                  // в памяти не больше трёх треков
+    while (order.length > 3) {
+      var k = order.shift();
+      if (k === cur || k === want) { order.push(k); break; }
+      delete buffers[k];
+    }
+  }
+  function load(name) {
+    if (buffers[name]) return Promise.resolve(buffers[name]);
+    if (loading[name]) return loading[name];
+    loading[name] = fetch('audio/song_' + name + '.ogg')
+      .then(function (r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.arrayBuffer();
+      })
+      .then(function (data) {
+        return new Promise(function (ok, fail) { ctx.decodeAudioData(data, ok, fail); });
+      })
+      .then(function (buf) {
+        buffers[name] = buf; order.push(name); trim();
+        delete loading[name];
+        return buf;
+      })
+      .catch(function (e) {
+        delete loading[name];
+        window.otMusic.failed = true;
+        console.log('OT_MUSIC_ERR ' + name + ' ' + e);
+      });
+    return loading[name];
+  }
+  function startSource(name, buf) {
+    if (want !== name) return;       // пока грузился, выбрали другой трек
+    var s = ctx.createBufferSource();
+    s.buffer = buf; s.loop = true; s.connect(master); s.start(0);
+    var old = src; src = s; cur = name;
+    if (old) { try { old.stop(); } catch (e) {} }
+    console.log('OT_MUSIC play ' + name + ' ctx=' + ctx.state);
+  }
+
+  window.otMusic = {
+    failed: false,
+    play: function (name) {
+      want = name;
+      if (cur === name && src) return;
+      if (!ensure()) return;
+      load(name).then(function (buf) { if (buf) startSource(name, buf); });
+    },
+    preload: function (name) {
+      if (ensure()) load(name);
+    },
+    stop: function () {
+      want = null; cur = null;
+      if (src) { try { src.stop(); } catch (e) {} src = null; }
+    },
+    volume: function (v) {
+      level = Math.max(0, Math.min(1, v));
+      if (master) master.gain.setTargetAtTime(level, ctx.currentTime, 0.015);
+    },
+    pause: function () { userPaused = true; apply(); },
+    resume: function () { userPaused = false; apply(); },
+    bgPause: function () { bgPaused = true; apply(); },
+    bgResume: function () { bgPaused = false; apply(); },
+    kick: function () { apply(); },  // первый жест пользователя: пробуем запустить
+    state: function () {
+      return JSON.stringify({ cur: cur, want: want, ctx: ctx ? ctx.state : null,
+        level: level, userPaused: userPaused, bgPaused: bgPaused,
+        loaded: Object.keys(buffers), failed: this.failed });
+    }
+  };
+})();
+(function () {
+  var list = window.__otAC, unlocked = false;
   function unlock() {
     unlocked = true;
     list.forEach(function (c) { try { if (c.state === 'suspended') c.resume(); } catch (e) {} });
+    window.otMusic.kick();
   }
   ['pointerdown', 'touchend', 'click', 'keydown'].forEach(function (ev) {
     window.addEventListener(ev, unlock, true);
   });
-  // вкладка в фоне: музыки быть не должно
   document.addEventListener('visibilitychange', function () {
     list.forEach(function (c) {
       try {
@@ -22,8 +119,9 @@
         else if (unlocked) c.resume();
       } catch (e) {}
     });
+    if (document.hidden) window.otMusic.bgPause(); else window.otMusic.bgResume();
   });
-})();</script><script src="splash/splash.js?v=1790840002"></script><script src="https://pygame-web.github.io/cdn/0.9.3/pythons.js" type=module id="site" data-python="python3.12" data-LINES=42 data-COLUMNS=132 data-os="vtx,snd,gui" async defer>#<!--
+})();</script><script src="splash/splash.js?v=1790840543"></script><script src="https://pygame-web.github.io/cdn/0.9.3/pythons.js" type=module id="site" data-python="python3.12" data-LINES=42 data-COLUMNS=132 data-os="vtx,snd,gui" async defer>#<!--
 
 print("""
 Loading olivertreemobile from olivertreemobile.apk
