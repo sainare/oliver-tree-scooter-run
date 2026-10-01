@@ -1,7 +1,7 @@
 (function () {
   'use strict';
   var M = {"canvas_w": 426, "canvas_h": 180, "ground_y": 148, "player_x": 54, "ride_off": 45, "road_hi": "F080A8", "road": "1A181E", "road_dark": "0D0C10", "road_line": "FAF4E2", "sky_top": "783E94"};
-  var names = ['sky', 'clouds', 'city', 'trees', 'title', 'loading', 'rider0', 'rider1', 'rider2', 'rider3'];
+  var names = ['sky', 'clouds', 'city', 'trees', 'title', 'loading', 'version', 'rider0', 'rider1', 'rider2', 'rider3'];
   var img = {}, loaded = 0;
   var cv = document.createElement('canvas');
   cv.id = 'ot-splash';
@@ -17,6 +17,7 @@
   names.forEach(function (n) {
     var im = new Image();
     im.onload = function () { loaded++; };
+    im.onerror = function () { loaded++; img[n] = null; };   // без картинки заставка не встаёт
     im.src = 'splash/' + n + '.png';
     img[n] = im;
   });
@@ -101,6 +102,11 @@
       ctx.globalAlpha = 0.55 + 0.45 * Math.abs(Math.sin(t * 2.6));
       ctx.drawImage(lo, Math.round((w - lw) / 2), Math.round(157 * k + oy), Math.round(lw), Math.round(lo.height * k));
       ctx.globalAlpha = 1;
+    }
+    var vi = img.version;                     // номер версии в правом верхнем углу
+    if (vi && vi.width > 1) {
+      ctx.drawImage(vi, Math.round(w - vi.width * k - 12 * k), Math.round(5 * k + oy),
+        Math.round(vi.width * k), Math.round(vi.height * k));
     }
 
     if (dissolve > 0) {                       // клетки открываются, пока игра под ними
