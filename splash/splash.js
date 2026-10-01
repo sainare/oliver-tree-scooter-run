@@ -10,7 +10,9 @@
   (document.body || document.documentElement).appendChild(cv);
   var ctx = cv.getContext('2d');
   var t0 = performance.now(), progress = 0, target = 0, completing = false;
-  var dissolveStart = 0, finished = false, thr = null, cols = 0, rows = 0, CELL = 10;
+  var dissolveStart = 0, finished = false, thr = null, cols = 0, rows = 0, CELL = 10, oy = 0;
+  // масштаб: в альбоме сцена по высоте, на узком экране — по ширине (300 ед.), по центру
+  function scaleK() { return Math.min(cv.height / M.canvas_h, cv.width / 300); }
 
   names.forEach(function (n) {
     var im = new Image();
@@ -26,9 +28,9 @@
     cv.width = Math.round(window.innerWidth * dpr);
     cv.height = Math.round(window.innerHeight * dpr);
     ctx.imageSmoothingEnabled = false;
-    var k = cv.height / M.canvas_h;
-    cols = Math.ceil(cv.width / k / CELL) + 1;
-    rows = Math.ceil(M.canvas_h / CELL);
+    var k = scaleK();
+    cols = Math.ceil(cv.width / (k * CELL)) + 1;
+    rows = Math.ceil(cv.height / (k * CELL)) + 1;
     thr = new Float32Array(cols * rows);
     for (var cy = 0; cy < rows; cy++)
       for (var cx = 0; cx < cols; cx++)
@@ -40,18 +42,19 @@
   function layer(b, speed, t, k, shift) {
     var off = (speed * t) % M.canvas_w, x = -off * k + shift;
     for (var i = 0; i < 2; i++)
-      ctx.drawImage(b, Math.round(x + i * M.canvas_w * k), 0, Math.round(M.canvas_w * k), cv.height);
+      ctx.drawImage(b, Math.round(x + i * M.canvas_w * k), Math.round(oy), Math.round(M.canvas_w * k), Math.round(M.canvas_h * k));
   }
   function rect(k, shift, x, y, w, h, color) {
     ctx.fillStyle = color;
-    ctx.fillRect(shift + x * k, y * k, w * k, h * k);
+    ctx.fillRect(shift + x * k, y * k + oy, w * k, h * k);
   }
 
   function frame(now) {
     if (finished) return;
     if (loaded < names.length) { requestAnimationFrame(frame); return; }
     var t = (now - t0) / 1000, w = cv.width, h = cv.height;
-    var k = h / M.canvas_h, shift = -(M.canvas_w - w / k) / 2 * k, run = 78;
+    var k = scaleK(), shift = -(M.canvas_w - w / k) / 2 * k, run = 78;
+    oy = (h - M.canvas_h * k) / 2;
 
     if (completing && !dissolveStart && progress > 0.985) dissolveStart = now;
     var dissolve = 0;
@@ -63,7 +66,7 @@
     ctx.clearRect(0, 0, w, h);
     ctx.fillStyle = '#' + M.sky_top;
     ctx.fillRect(0, 0, w, h);
-    ctx.drawImage(img.sky, Math.round(shift), 0, Math.round(M.canvas_w * k), h);
+    ctx.drawImage(img.sky, Math.round(shift), Math.round(oy), Math.round(M.canvas_w * k), Math.round(M.canvas_h * k));
     layer(img.clouds, run * 0.10, t, k, shift);
     layer(img.city, run * 0.28, t, k, shift);
     layer(img.trees, run * 0.62, t, k, shift);
@@ -76,12 +79,14 @@
     for (var x = -32; x < M.canvas_w + 32; x += 32)
       rect(k, shift, x - dashOff, gy + 6, 14, 2, '#' + M.road_line);
 
+    ctx.fillStyle = '#' + M.road_dark;            // низ экрана под дорогой (узкий экран)
+    ctx.fillRect(0, oy + M.canvas_h * k - 1, w, h);
     var r = img['rider' + (Math.floor(t * 14) % 4)];
     var bob = Math.sin(t * 15) * 0.5;
     ctx.drawImage(r, Math.round(shift + (M.player_x - 1) * k),
-      Math.round((gy - M.ride_off + bob) * k), Math.round(r.width * k), Math.round(r.height * k));
+      Math.round((gy - M.ride_off + bob) * k + oy), Math.round(r.width * k), Math.round(r.height * k));
 
-    var ti = img.title, tw = ti.width * k, ty = (10 + Math.sin(t * 4.2) * 2) * k;
+    var ti = img.title, tw = ti.width * k, ty = (10 + Math.sin(t * 4.2) * 2) * k + oy;
     ctx.drawImage(ti, Math.round((w - tw) / 2), Math.round(ty), Math.round(tw), Math.round(ti.height * k));
 
     if (!completing) target = 0.92 * (1 - Math.exp(-t / 3.4));
@@ -94,7 +99,7 @@
     if (!completing) {
       var lo = img.loading, lw = lo.width * k;
       ctx.globalAlpha = 0.55 + 0.45 * Math.abs(Math.sin(t * 2.6));
-      ctx.drawImage(lo, Math.round((w - lw) / 2), Math.round(157 * k), Math.round(lw), Math.round(lo.height * k));
+      ctx.drawImage(lo, Math.round((w - lw) / 2), Math.round(157 * k + oy), Math.round(lw), Math.round(lo.height * k));
       ctx.globalAlpha = 1;
     }
 
