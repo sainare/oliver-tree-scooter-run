@@ -1,4 +1,4 @@
-<html lang="en-us"><style>html,body{background:#000!important;margin:0}</style><script>(function () {
+<html lang="en-us"><style>html,body{background:#000!important;margin:0}</style><script src="music_data.js?v=1790848522"></script><script>(function () {
   // pygbag при старте без касания пытается проиграть «пустой» звук и, получив
   // отказ браузера, показывает alert. Звук мы разблокируем сами по первому
   // касанию, поэтому это сообщение гасим (остальные alert не трогаем).
@@ -19,9 +19,143 @@
     W.prototype = C.prototype; window[n] = W;
   });
 
-  var ctx = null, master = null, src = null, cur = null, want = null;
+  // ---- синтезатор: порт chiptune.render_song (самодостаточная функция:
+  // её текст уходит в Web Worker) --------------------------------------------
+  function renderSong(spec, SR, opts) {
+    var TARGET_RMS = 0.185;
+    var SEMI = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 };
+    function toks(p) { p = (p || '').trim(); return p ? p.split(/\s+/) : []; }
+    function midiOf(tok) {
+      var m = /^([A-Ga-g])([#b]?)(-?\d+)$/.exec(tok);
+      var semi = SEMI[m[1].toUpperCase()];
+      if (m[2] === '#') semi += 1; else if (m[2] === 'b') semi -= 1;
+      return 12 * (parseInt(m[3], 10) + 1) + semi;
+    }
+    function events(p) {
+      var ev = [], t = toks(p);
+      for (var i = 0; i < t.length; i++) {
+        var tok = t[i];
+        if (tok === '.') {
+          if (ev.length) ev[ev.length - 1][1]++; else ev.push([null, 1]);
+        } else if (tok === '-') {
+          if (ev.length && ev[ev.length - 1][0] === null) ev[ev.length - 1][1]++;
+          else ev.push([null, 1]);
+        } else ev.push([midiOf(tok), 1]);
+      }
+      return ev;
+    }
+    function dflt(v, d) { return (v === undefined || v === null) ? d : v; }
+    var step = Math.floor(SR * 60 / spec.bpm / 4);
+    var steps = Math.max(toks(spec.lead).length, toks(spec.bass).length,
+                         toks(spec.drum).length);
+    var total = steps * step;
+    var mix = new Float64Array(total);
+
+    function tone(pattern, tri, duty, vol, cents) {
+      var ev = events(pattern), pos = 0, mul = Math.pow(2, cents / 1200);
+      var S = 0.65;
+      for (var e = 0; e < ev.length; e++) {
+        var midi = ev[e][0], len = ev[e][1] * step;
+        if (midi !== null && pos < total) {
+          var cnt = Math.min(len, total - pos);
+          var inc = (440 * Math.pow(2, (midi - 69) / 12) * mul) / SR;
+          // огибающая — как envelope() в chiptune.py
+          var na = Math.min(Math.floor(0.004 * SR), cnt);
+          var nd = Math.min(Math.floor(0.06 * SR), cnt - na);
+          var nr = Math.min(Math.floor(0.05 * SR), Math.max(0, cnt - na - nd));
+          var p0 = na + nd, hold = cnt - p0 - nr;
+          var holdEnd = hold > 0 ? p0 + hold : p0, rel = cnt - holdEnd;
+          for (var i = 0; i < cnt; i++) {
+            var env, k;
+            if (i < na) env = na > 1 ? i / (na - 1) : 0;
+            else if (i < na + nd) {
+              k = i - na; env = nd > 1 ? 1 + (S - 1) * k / (nd - 1) : 1;
+            } else if (i < holdEnd) env = S;
+            else { k = i - holdEnd; env = rel > 1 ? S * (1 - k / (rel - 1)) : S; }
+            var phase = (i * inc) % 1.0, w;
+            if (tri) w = 4 * Math.abs(phase - 0.5) - 1;
+            else w = phase < duty ? 1 : -1;
+            mix[pos + i] += w * env * vol;
+          }
+        }
+        pos += len;
+      }
+    }
+
+    function rng(seed) {                  // mulberry32: шум барабанов
+      var a = seed >>> 0;
+      return function () {
+        a = (a + 0x6D2B79F5) >>> 0;
+        var t = a;
+        t = Math.imul(t ^ (t >>> 15), t | 1);
+        t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+      };
+    }
+    function drums(pattern, vol, seed) {
+      var r = rng(seed), dt = toks(pattern), L = { K: 0.14, S: 0.16, H: 0.05 };
+      for (var i = 0; i < dt.length; i++) {
+        var pos = i * step;
+        if (pos >= total) break;
+        var tok = dt[i];
+        for (var c = 0; c < tok.length; c++) {
+          var ch = tok.charAt(c);
+          if (!(ch in L)) continue;
+          var cnt = Math.min(Math.floor(L[ch] * SR), total - pos), j;
+          var den = cnt > 1 ? cnt - 1 : 1;
+          if (ch === 'K') {
+            var acc = 0;
+            for (j = 0; j < cnt; j++) {
+              acc += cnt > 1 ? 160 + (45 - 160) * j / den : 160;
+              mix[pos + j] += Math.sin(2 * Math.PI * (acc / SR)) *
+                Math.exp(-(cnt > 1 ? 9 * j / den : 0)) * vol;
+            }
+          } else if (ch === 'S') {
+            for (j = 0; j < cnt; j++) {
+              var tn = Math.sin(2 * Math.PI * j * 190 / SR) * 0.35;
+              mix[pos + j] += ((r() * 2 - 1) * 0.8 + tn) *
+                Math.exp(-(cnt > 1 ? 14 * j / den : 0)) * vol;
+            }
+          } else {
+            var nz = new Float64Array(cnt);
+            for (j = 0; j < cnt; j++) nz[j] = r() * 2 - 1;
+            for (j = cnt - 1; j >= 1; j--) nz[j] -= nz[j - 1] * 0.7;
+            for (j = 0; j < cnt; j++)
+              mix[pos + j] += nz[j] * Math.exp(-(cnt > 1 ? 45 * j / den : 0)) * 0.45 * vol;
+          }
+        }
+      }
+    }
+
+    tone(spec.lead, false, dflt(spec.lead_duty, 0.5), dflt(spec.lead_vol, 0.20), 0);
+    if (toks(spec.harm).length)
+      tone(spec.harm, false, dflt(spec.harm_duty, 0.25), dflt(spec.harm_vol, 0.12),
+           dflt(spec.harm_detune, 6.0));
+    tone(spec.bass, true, 0, dflt(spec.bass_vol, 0.30), 0);
+    if (!(opts && opts.noDrums)) drums(spec.drum, dflt(spec.drum_vol, 0.32), 7);
+
+    // все треки одной громкости: целимся в общий RMS, пик не выше 0.92
+    var sum2 = 0, peak = 0, i;
+    for (i = 0; i < total; i++) {
+      var v = mix[i]; sum2 += v * v;
+      var a = v < 0 ? -v : v; if (a > peak) peak = a;
+    }
+    var rms = Math.sqrt(sum2 / total), g = 1;
+    if (rms > 0) g = Math.min(TARGET_RMS / rms, 0.92 / peak);
+    var out = new Float32Array(total);
+    for (i = 0; i < total; i++) {
+      var x = mix[i] * g;
+      out[i] = (x > 1 ? 1 : (x < -1 ? -1 : x)) * 0.85;
+    }
+    return out;
+  }
+
+  // ---- проигрыватель ----------------------------------------------------------
+  var SR = 44100;
+  var ctx = null, master = null, src = null, srcGain = null, cur = null, want = null;
   var buffers = {}, loading = {}, order = [];
   var level = 1, userPaused = false, bgPaused = false;
+  var worker = null, pending = {}, jobId = 0, workerTried = false;
 
   function ensure() {
     if (ctx || !Orig) return !!ctx;
@@ -50,35 +184,75 @@
       delete buffers[k];
     }
   }
+  function startWorker() {
+    if (workerTried) return;
+    workerTried = true;
+    try {
+      var code = 'var renderSong=' + renderSong.toString() + ';' +
+        'onmessage=function(e){var d=e.data;try{var o=renderSong(d.spec,d.sr,d.opts);' +
+        'postMessage({id:d.id,buf:o.buffer},[o.buffer]);}catch(x){postMessage({id:d.id,error:String(x)});}};';
+      worker = new Worker(URL.createObjectURL(new Blob([code], { type: 'application/javascript' })));
+      worker.onmessage = function (e) {
+        var d = e.data, job = pending[d.id];
+        if (!job) return;
+        delete pending[d.id];
+        if (d.error) job.fail(new Error(d.error)); else job.ok(new Float32Array(d.buf));
+      };
+      worker.onerror = function () {   // воркер недоступен: считаем в основном потоке
+        var jobs = pending; pending = {}; worker = null;
+        Object.keys(jobs).forEach(function (id) { runMain(jobs[id]); });
+      };
+    } catch (e) { worker = null; }
+  }
+  function runMain(job) {
+    setTimeout(function () {
+      try { job.ok(renderSong(job.spec, SR, job.opts)); } catch (e) { job.fail(e); }
+    }, 0);
+  }
+  function renderAsync(spec, opts) {
+    return new Promise(function (ok, fail) {
+      var job = { spec: spec, opts: opts, ok: ok, fail: fail };
+      startWorker();
+      if (worker) {
+        var id = ++jobId; pending[id] = job;
+        worker.postMessage({ id: id, spec: spec, sr: SR, opts: opts });
+      } else runMain(job);
+    });
+  }
   function load(name) {
     if (buffers[name]) return Promise.resolve(buffers[name]);
     if (loading[name]) return loading[name];
-    loading[name] = fetch('audio/song_' + name + '.ogg')
-      .then(function (r) {
-        if (!r.ok) throw new Error('HTTP ' + r.status);
-        return r.arrayBuffer();
-      })
-      .then(function (data) {
-        return new Promise(function (ok, fail) { ctx.decodeAudioData(data, ok, fail); });
-      })
-      .then(function (buf) {
-        buffers[name] = buf; order.push(name); trim();
-        delete loading[name];
-        return buf;
-      })
-      .catch(function (e) {
-        delete loading[name];
-        window.otMusic.failed = true;
-        console.log('OT_MUSIC_ERR ' + name + ' ' + e);
-      });
+    var spec = window.OT_SONGS && window.OT_SONGS[name];
+    if (!spec) { console.log('OT_MUSIC_ERR нет трека ' + name); return Promise.resolve(null); }
+    loading[name] = renderAsync(spec).then(function (pcm) {
+      var buf = ctx.createBuffer(1, pcm.length, SR);
+      buf.getChannelData(0).set(pcm);
+      buffers[name] = buf; order.push(name); trim();
+      delete loading[name];
+      return buf;
+    }).catch(function (e) {
+      delete loading[name];
+      window.otMusic.failed = true;
+      console.log('OT_MUSIC_ERR ' + name + ' ' + e);
+      return null;
+    });
     return loading[name];
   }
   function startSource(name, buf) {
-    if (want !== name) return;       // пока грузился, выбрали другой трек
-    var s = ctx.createBufferSource();
-    s.buffer = buf; s.loop = true; s.connect(master); s.start(0);
-    var old = src; src = s; cur = name;
-    if (old) { try { old.stop(); } catch (e) {} }
+    if (want !== name) return;       // пока считался, выбрали другой трек
+    var now = ctx.currentTime;
+    var s = ctx.createBufferSource(), g = ctx.createGain();
+    s.buffer = buf; s.loop = true;
+    s.connect(g); g.connect(master);
+    var cross = src !== null;        // был трек — плавный переход
+    g.gain.value = cross ? 0 : 1;
+    s.start(0);
+    if (cross) {
+      g.gain.setTargetAtTime(1, now, 0.12);
+      srcGain.gain.setTargetAtTime(0, now, 0.12);
+      try { src.stop(now + 0.9); } catch (e) {}
+    }
+    src = s; srcGain = g; cur = name;
     console.log('OT_MUSIC play ' + name + ' ctx=' + ctx.state);
   }
 
@@ -95,23 +269,51 @@
     },
     stop: function () {
       want = null; cur = null;
-      if (src) { try { src.stop(); } catch (e) {} src = null; }
+      if (src) { try { src.stop(); } catch (e) {} src = null; srcGain = null; }
     },
     volume: function (v) {
       level = Math.max(0, Math.min(1, v));
       if (master) master.gain.setTargetAtTime(level, ctx.currentTime, 0.015);
     },
-    pause: function () { userPaused = true; apply(); },
-    resume: function () { userPaused = false; apply(); },
+    pause: function () { userPaused = true; apply(); console.log('OT_MUSIC pause'); },
+    resume: function () { userPaused = false; apply(); console.log('OT_MUSIC resume'); },
     bgPause: function () { bgPaused = true; apply(); },
     bgResume: function () { bgPaused = false; apply(); },
     kick: function () { apply(); },  // первый жест пользователя: пробуем запустить
     state: function () {
       return JSON.stringify({ cur: cur, want: want, ctx: ctx ? ctx.state : null,
         level: level, userPaused: userPaused, bgPaused: bgPaused,
-        loaded: Object.keys(buffers), failed: this.failed });
+        loaded: Object.keys(buffers), worker: !!worker, failed: this.failed });
+    },
+    // для проверок: считает трек в основном потоке и возвращает выборку
+    debug: function (name, noDrums) {
+      var pcm = renderSong(window.OT_SONGS[name], SR, { noDrums: !!noDrums });
+      var s2 = 0, pk = 0, i;
+      for (i = 0; i < pcm.length; i++) { s2 += pcm[i] * pcm[i]; if (Math.abs(pcm[i]) > pk) pk = Math.abs(pcm[i]); }
+      var picks = [], stepP = Math.floor(pcm.length / 64);
+      for (i = 0; i < 64; i++) picks.push(pcm[i * stepP + 5]);
+      return JSON.stringify({ len: pcm.length, rms: Math.sqrt(s2 / pcm.length), peak: pk, picks: picks });
     }
   };
+
+  // ---- музыка на экране загрузки: играет, пока грузится Python ----------------
+  try {
+    var cfg = {};
+    try { cfg = JSON.parse(localStorage.getItem('oliver_cfg') || '{}') || {}; } catch (e) {}
+    var keys = window.OT_LOAD_KEYS || [];
+    if (keys.length && window.OT_SONGS) {
+      var v = parseInt(cfg.mus_load, 10) || 0, name;
+      if (v > 0 && v <= keys.length) name = keys[v - 1];
+      else {
+        var last = null;
+        try { last = localStorage.getItem('oliver_last_load'); } catch (e) {}
+        var pool = keys.filter(function (k) { return k !== last; });
+        name = pool[Math.floor(Math.random() * pool.length)];
+        try { localStorage.setItem('oliver_last_load', name); } catch (e) {}
+      }
+      window.otMusic.play(name);
+    }
+  } catch (e) { console.log('OT_MUSIC_ERR загрузочная музыка ' + e); }
 })();
 (function () {
   var list = window.__otAC, unlocked = false;
@@ -132,7 +334,7 @@
     });
     if (document.hidden) window.otMusic.bgPause(); else window.otMusic.bgResume();
   });
-})();</script><script src="splash/splash.js?v=1790840992"></script><script src="https://pygame-web.github.io/cdn/0.9.3/pythons.js" type=module id="site" data-python="python3.12" data-LINES=42 data-COLUMNS=132 data-os="vtx,snd,gui" async defer>#<!--
+})();</script><script src="splash/splash.js?v=1790848522"></script><script src="https://pygame-web.github.io/cdn/0.9.3/pythons.js" type=module id="site" data-python="python3.12" data-LINES=42 data-COLUMNS=132 data-os="vtx,snd,gui" async defer>#<!--
 
 print("""
 Loading olivertreemobile from olivertreemobile.apk
