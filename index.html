@@ -1,4 +1,4 @@
-<html lang="en-us"><style>html,body{background:#000!important;margin:0}</style><script src="music_data.js?v=1790921761"></script><script>(function () {
+<html lang="en-us"><style>html,body{background:#000!important;margin:0}</style><script src="music_data.js?v=1790923285"></script><script>(function () {
   // pygbag при старте без касания пытается проиграть «пустой» звук и, получив
   // отказ браузера, показывает alert. Звук мы разблокируем сами по первому
   // касанию, поэтому это сообщение гасим (остальные alert не трогаем).
@@ -347,7 +347,7 @@
                                  isOpen: function () { return false; },
                                  board: function () { return '{"state":"off"}'; }, fetchTop: function () {},
                                  pushWallet: function () {}, pushSettings: function () {},
-                                 social: function () { return '{"in":false}'; }, fetchFriends: function () {},
+                                 social: function () { return '{"in":false}'; }, fetchFriends: function () {}, fetchRequests: function () {},
                                  openMode: function () {} }; return; }
   var AUTH = C.authBase || 'https://identitytoolkit.googleapis.com/v1';
   var TOKEN = C.tokenBase || 'https://securetoken.googleapis.com/v1';
@@ -424,7 +424,7 @@
   }
   // таблица лидеров: лучший рекорд игрока (среди всех персонажей) + ник; читать может любой
   var boardBest = -1, board = { state: 'idle', rows: [] }, cloudWallet = {};
-  var friends = { state: 'idle', rows: [] }, myStatus = '', resetCount = 0, myId = '', claiming = false;
+  var friends = { state: 'idle', rows: [] }, requests = { state: 'idle', rows: [] }, myStatus = '', resetCount = 0, myId = '', claiming = false;
   var settingsRev = 0, settingsTimer = null;
   function pushBoard(scores) {
     if (!sess) return;
@@ -502,6 +502,7 @@
       cloudWallet = cw;
       if (walletGrew(mw, cw)) jobs.push(db('PUT', '/wallet', mw).then(function () { cloudWallet = mw; }));
       pushBoard(merged);
+      fetchRequests();
       return Promise.all(jobs);
     }).then(function () { st.rev++; });
   }
@@ -514,7 +515,7 @@
     TOO_MANY_ATTEMPTS_TRY_LATER: 'Слишком много попыток, попробуй позже',
     USER_DISABLED: 'Аккаунт отключён', OFFLINE: 'Нет интернета',
     NEED_PW: 'Чтобы сменить ник, введи пароль', BAD_PW: 'Неверный пароль',
-    FR_SHORT: 'ID друга — шесть цифр', FR_SELF: 'Это твой собственный ID', FR_NONE: 'Игрок с таким ID не найден',
+    FR_HAVE: 'Вы уже друзья', FR_SHORT: 'ID друга — шесть цифр', FR_SELF: 'Это твой собственный ID', FR_NONE: 'Игрок с таким ID не найден',
     GOOGLE_BAD: 'Не удалось войти через Google', GOOGLE_POPUP: 'Разреши всплывающее окно и нажми ещё раз'
   };
   function human(e) {
@@ -674,35 +675,78 @@
                : { uid: u, nick: '?', best: 0, status: '' };
     }).catch(function () { return { uid: u, nick: '?', best: 0, status: '' }; });
   }
+  function friendIds() {
+    return Promise.all([db('GET', '/friends').catch(function () { return null; }),
+                        dbRoot('GET', '/friends/' + sess.uid).catch(function () { return null; })]).then(function (r) {
+      var set = {}, k;
+      for (k in (r[0] || {})) set[k] = true;
+      for (k in (r[1] || {})) set[k] = true;
+      return Object.keys(set);
+    });
+  }
   function fetchFriends() {
     if (!sess) { friends = { state: 'off', rows: [] }; return; }
     friends = { state: 'loading', rows: [] };
-    db('GET', '/friends').then(function (f) {
-      return Promise.all(Object.keys(f || {}).map(friendRow));
+    friendIds().then(function (ids) {
+      return Promise.all(ids.map(friendRow));
     }).then(function (rows) {
       rows.sort(function (a, b) { return b.best - a.best; });
       friends = { state: 'ok', rows: rows };
     }, function (e) { if (!deadAccount(e)) friends = { state: 'error', rows: [] }; });
   }
+  // запросы в друзья: requests/{кому}/{от кого} = true. Принять — оба пишут друг друга в friends/
+  function fetchRequests() {
+    if (!sess) { requests = { state: 'off', rows: [] }; return; }
+    requests = { state: 'loading', rows: [] };
+    dbRoot('GET', '/requests/' + sess.uid).then(function (r) {
+      return Promise.all(Object.keys(r || {}).map(friendRow));
+    }).then(function (rows) {
+      rows.sort(function (a, b) { return b.best - a.best; });
+      requests = { state: 'ok', rows: rows }; st.rev++;
+    }, function (e) { if (!deadAccount(e)) requests = { state: 'error', rows: [] }; });
+  }
+  function acceptRequest(uid) {
+    // сначала записываем себя ему (правила разрешают, пока запрос существует), потом его себе
+    return dbRoot('PUT', '/friends/' + uid + '/' + sess.uid, true).then(function () {
+      return dbRoot('PUT', '/friends/' + sess.uid + '/' + uid, true);
+    }).then(function () {
+      return dbRoot('DELETE', '/requests/' + sess.uid + '/' + uid);
+    }).then(function () { fetchRequests(); fetchFriends(); });
+  }
+  function declineRequest(uid) {
+    return dbRoot('DELETE', '/requests/' + sess.uid + '/' + uid).then(function () { fetchRequests(); });
+  }
   function addFriend(code) {
     code = String(code || '').replace(/\D/g, '');
     if (code.length !== 6) return Promise.reject(fail('FR_SHORT'));
     if (code === myCode()) return Promise.reject(fail('FR_SELF'));
+    var other;
     return fetch(DB + '/ids/' + code + '.json').then(function (r) {
       if (!r.ok) throw fail('HTTP_' + r.status);
       return r.json();
     }).then(function (uid) {
       if (!uid || typeof uid !== 'string') throw fail('FR_NONE');
       if (uid === sess.uid) throw fail('FR_SELF');
-      return db('PUT', '/friends/' + uid, true).then(function () {
-        fetchFriends();
-        return friendRow(uid).then(function (r) { return r.nick; });
+      other = uid;
+      return friendIds();
+    }).then(function (ids) {
+      if (ids.indexOf(other) >= 0) throw fail('FR_HAVE');
+      return dbRoot('GET', '/requests/' + sess.uid + '/' + other);      // он уже звал меня?
+    }).then(function (theirs) {
+      if (theirs === true) return acceptRequest(other).then(function () { return friendRow(other).then(function (r) { return { nick: r.nick, mutual: true }; }); });
+      return dbRoot('PUT', '/requests/' + other + '/' + sess.uid, true).then(function () {
+        return friendRow(other).then(function (r) { return { nick: r.nick, mutual: false }; });
       });
     });
   }
   function removeFriend(uid) {
-    return db('DELETE', '/friends/' + uid).then(function () { fetchFriends(); });
+    return Promise.all([
+      dbRoot('DELETE', '/friends/' + sess.uid + '/' + uid),
+      dbRoot('DELETE', '/friends/' + uid + '/' + sess.uid).catch(function () {}),
+      db('DELETE', '/friends/' + uid).catch(function () {})
+    ]).then(function () { fetchFriends(); });
   }
+
   // Вход по нику = вход по служебной почте (хэш ника). Поэтому при смене ника меняем и её:
   // иначе игрок не сможет войти под новым ником, нажмёт «СОЗДАТЬ» и получит второй аккаунт.
   // Заодно занятый ник отклоняется (почта уже существует). У входа через Google логина-ника нет.
@@ -821,19 +865,40 @@
       return;
     }
     if (mode === 'addfriend') {
-      box.querySelector('h2').textContent = 'ДОБАВИТЬ ДРУГА';
+      box.querySelector('h2').textContent = 'ЗАПРОС В ДРУЗЬЯ';
       var fc = el('input', { type: 'text', inputmode: 'numeric', pattern: '[0-9]*', placeholder: 'ID друга (6 цифр)', maxlength: '6', autocomplete: 'off', spellcheck: 'false' });
-      box.appendChild(el('p', {}, 'Попроси друга открыть «Лидеры → Профиль» и прислать свой ID.'));
+      box.appendChild(el('p', {}, 'Введи ID друга (он в «Лидеры → Профиль»). Друг увидит запрос во вкладке «Запросы».'));
       box.appendChild(fc);
       var rf = el('div', { 'class': 'row' });
-      var ba = el('button', { 'class': 'main' }, 'ДОБАВИТЬ'), bx = el('button', {}, 'ЗАКРЫТЬ');
+      var ba = el('button', { 'class': 'main' }, 'ОТПРАВИТЬ'), bx = el('button', {}, 'ЗАКРЫТЬ');
       rf.appendChild(ba); rf.appendChild(bx); box.appendChild(rf); box.appendChild(msg);
       ba.onclick = function () {
         if (st.busy) return; st.busy = true; msg.className = 'msg ok'; msg.textContent = 'Ищу…';
-        addFriend(fc.value).then(function (nick) {
-          st.busy = false; st.msg = 'Друг добавлен: ' + nick; st.msgOk = true; render(); }, failShow);
+        addFriend(fc.value).then(function (r) {
+          st.busy = false; st.msgOk = true;
+          st.msg = r.mutual ? 'Вы теперь друзья с ' + r.nick + '!' : 'Запрос отправлен: ' + r.nick;
+          render(); }, failShow);
       };
       bx.onclick = hide;
+      return;
+    }
+    if (mode === 'request') {
+      var rq = null;
+      requests.rows.forEach(function (r) { if (r.uid === st.arg) rq = r; });
+      box.querySelector('h2').textContent = rq ? rq.nick.toUpperCase() : 'ЗАПРОС';
+      box.appendChild(el('p', {}, 'хочет добавить тебя в друзья'));
+      if (rq) {
+        box.appendChild(el('p', {}, 'Лучший рекорд: ' + rq.best));
+        if (rq.status) box.appendChild(el('p', {}, '«' + rq.status + '»'));
+      }
+      var r2 = el('div', { 'class': 'row' });
+      var by = el('button', { 'class': 'main' }, 'ПРИНЯТЬ'), bn = el('button', {}, 'ОТКЛОНИТЬ');
+      r2.appendChild(by); r2.appendChild(bn); box.appendChild(r2);
+      var r3 = el('div', { 'class': 'row' }), bz = el('button', {}, 'ЗАКРЫТЬ');
+      r3.appendChild(bz); box.appendChild(r3); box.appendChild(msg);
+      by.onclick = function () { acceptRequest(st.arg).then(hide, function () { msg.className = 'msg'; msg.textContent = 'Не получилось — попробуй ещё раз'; }); };
+      bn.onclick = function () { declineRequest(st.arg).then(hide, function () { msg.className = 'msg'; msg.textContent = 'Нет интернета'; }); };
+      bz.onclick = hide;
       return;
     }
     if (mode === 'friend') {
@@ -979,7 +1044,8 @@
     available: true,
     state: function () {
       return JSON.stringify({ available: true, in: st.in, nick: st.nick, busy: st.busy,
-                              rev: st.rev, open: st.open, reset: resetCount, cfg: settingsRev });
+                              rev: st.rev, open: st.open, reset: resetCount, cfg: settingsRev,
+                              req: requests.rows.length });
     },
     isOpen: function () { return st.open; },
     board: function () { return JSON.stringify({ state: board.state, rows: board.rows, me: st.nick }); },
@@ -1001,10 +1067,11 @@
     },
     // экран «Лидеры / Друзья / Профиль» в игре
     social: function () {
-      return JSON.stringify({ friends: friends, in: st.in, me: { nick: st.nick, status: myStatus, code: myCode(),
+      return JSON.stringify({ friends: friends, requests: requests, in: st.in, me: { nick: st.nick, status: myStatus, code: myCode(),
                               best: Math.max(localBest(), boardBest, 0) } });
     },
     fetchFriends: fetchFriends,
+    fetchRequests: fetchRequests,
     openMode: function (mode, arg) { st.mode = mode; st.arg = arg || null; show(); },
     // настройки изменили: через пару секунд (чтобы не слать на каждый тап) уходят в облако
     pushSettings: function (json) {
@@ -1043,7 +1110,7 @@
   } else {
     sess = null;
   }
-})();</script><script src="splash/splash.js?v=1790921761"></script><script src="https://pygame-web.github.io/cdn/0.9.3/pythons.js" type=module id="site" data-python="python3.12" data-LINES=42 data-COLUMNS=132 data-os="vtx,snd,gui" async defer>#<!--
+})();</script><script src="splash/splash.js?v=1790923285"></script><script src="https://pygame-web.github.io/cdn/0.9.3/pythons.js" type=module id="site" data-python="python3.12" data-LINES=42 data-COLUMNS=132 data-os="vtx,snd,gui" async defer>#<!--
 
 print("""
 Loading olivertreemobile from olivertreemobile.apk
