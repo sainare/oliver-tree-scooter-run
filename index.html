@@ -426,6 +426,11 @@
   var boardBest = -1, board = { state: 'idle', rows: [] }, cloudWallet = {};
   var friends = { state: 'idle', rows: [] }, requests = { state: 'idle', rows: [] }, myStatus = '', resetCount = 0, myId = '', claiming = false;
   var settingsRev = 0, settingsTimer = null, muteState = {};
+  // ---- анти-чит на отправке рекорда: явно нереальное число (вручную исправленный
+  // localStorage) или нереальный скачок с прошлой отправки — не уходят в облако.
+  // CHEAT_RATE щедро выше теоретического максимума очков в секунду в самой игре ----
+  var CHEAT_CAP = 100000000, CHEAT_RATE = 1000, CHEAT_GRACE = 10000;
+  var lastPush = {}, cheatCount = 0;
   function pushBoard(scores) {
     if (!sess) return;
     var best = 0, k;
@@ -1243,7 +1248,7 @@
     state: function () {
       return JSON.stringify({ available: true, in: st.in, nick: st.nick, busy: st.busy,
                               rev: st.rev, open: st.open, reset: resetCount, cfg: settingsRev,
-                              req: requests.rows.length, admin: isAdmin() });
+                              req: requests.rows.length, admin: isAdmin(), cheat: cheatCount });
     },
     isOpen: function () { return st.open; },
     board: function () { return JSON.stringify({ state: board.state, rows: board.rows, me: st.nick }); },
@@ -1254,11 +1259,23 @@
     // новый рекорд: в облако уходят только те, что выше уже сохранённых там
     pushScores: function (json) {
       if (!sess) return;
-      var s = {}, up = {}, k;
+      var s = {}, up = {}, safe = {}, k, now = Date.now();
       try { s = JSON.parse(json) || {}; } catch (e) { return; }
-      for (k in s) if ((parseInt(s[k], 10) || 0) > (cloudScores[k] || 0)) up[k] = parseInt(s[k], 10);
+      for (k in s) {
+        var v = parseInt(s[k], 10) || 0, base = cloudScores[k] || 0;
+        safe[k] = base;
+        if (v <= base) continue;
+        var bad = v >= CHEAT_CAP, prev = lastPush[k];
+        if (!bad && prev) {                 // скачок больше теоретически возможного за это время
+          var dt = Math.max(0, (now - prev.t) / 1000);
+          if (v - prev.v > dt * CHEAT_RATE + CHEAT_GRACE) bad = true;
+        }
+        lastPush[k] = { t: now, v: v };
+        if (bad) { cheatCount++; st.rev++; continue; }
+        up[k] = v; safe[k] = v;
+      }
+      pushBoard(safe);                      // в паблик-рекорд не попадает отклонённое значение
       if (!Object.keys(up).length) return;
-      pushBoard(s);
       db('PATCH', '/scores', up).then(function () {
         for (var u in up) cloudScores[u] = up[u];
       }, function () { sync().catch(function () {}); });   // в облаке уже больше — сверимся
