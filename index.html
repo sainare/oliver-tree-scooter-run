@@ -1,4 +1,4 @@
-<html lang="en-us"><style>html,body{background:#000!important;margin:0}</style><script src="music_data.js?v=1790920718"></script><script>(function () {
+<html lang="en-us"><style>html,body{background:#000!important;margin:0}</style><script src="music_data.js?v=1790921761"></script><script>(function () {
   // pygbag при старте без касания пытается проиграть «пустой» звук и, получив
   // отказ браузера, показывает alert. Звук мы разблокируем сами по первому
   // касанию, поэтому это сообщение гасим (остальные alert не трогаем).
@@ -513,6 +513,7 @@
     NICK_CHARS: 'В нике только буквы, цифры, пробел и _ . -',
     TOO_MANY_ATTEMPTS_TRY_LATER: 'Слишком много попыток, попробуй позже',
     USER_DISABLED: 'Аккаунт отключён', OFFLINE: 'Нет интернета',
+    NEED_PW: 'Чтобы сменить ник, введи пароль', BAD_PW: 'Неверный пароль',
     FR_SHORT: 'ID друга — шесть цифр', FR_SELF: 'Это твой собственный ID', FR_NONE: 'Игрок с таким ID не найден',
     GOOGLE_BAD: 'Не удалось войти через Google', GOOGLE_POPUP: 'Разреши всплывающее окно и нажми ещё раз'
   };
@@ -702,14 +703,45 @@
   function removeFriend(uid) {
     return db('DELETE', '/friends/' + uid).then(function () { fetchFriends(); });
   }
-  function saveProfile(nick, status) {
+  // Вход по нику = вход по служебной почте (хэш ника). Поэтому при смене ника меняем и её:
+  // иначе игрок не сможет войти под новым ником, нажмёт «СОЗДАТЬ» и получит второй аккаунт.
+  // Заодно занятый ник отклоняется (почта уже существует). У входа через Google логина-ника нет.
+  function changeLogin(nick, pass) {
+    return token().then(function (t) {
+      return post(AUTH + '/accounts:lookup?key=' + C.apiKey, { idToken: t });
+    }).then(function (j) {
+      var u = (j.users || [])[0] || {};
+      var pw = (u.providerUserInfo || []).some(function (x) { return x.providerId === 'password'; });
+      if (!pw) return null;
+      return emailOf(nick).then(function (newEmail) {
+        if (newEmail === u.email) return null;            // тот же ник (регистр не важен)
+        if (!pass) throw fail('NEED_PW');
+        return post(AUTH + '/accounts:signInWithPassword?key=' + C.apiKey,
+                    { email: u.email, password: String(pass), returnSecureToken: true })
+          .catch(function (e) { throw fail(/INVALID|PASSWORD/.test(String(e.code)) ? 'BAD_PW' : e.code); })
+          .then(function (r) {
+            return post(AUTH + '/accounts:update?key=' + C.apiKey,
+                        { idToken: r.idToken, email: newEmail, returnSecureToken: true });
+          }).then(function (r) {
+            idToken = r.idToken;
+            idUntil = Date.now() + (parseInt(r.expiresIn, 10) - 60) * 1000;
+            sess.refresh = r.refreshToken;
+            lsSet(KEY_SESS, JSON.stringify(sess));
+          });
+      });
+    });
+  }
+  function saveProfile(nick, status, pass) {
     nick = cleanNick(nick); status = String(status || '').trim().slice(0, 24);
     if (nick.length < 3 || nick.length > 16) return Promise.reject(fail('NICK_LEN'));
     if (!/^[0-9A-Za-zА-Яа-яЁё _.\-]+$/.test(nick)) return Promise.reject(fail('NICK_CHARS'));
     var best = Math.max(localBest(), boardBest, 0);
     var row = { nick: nick, best: best };
     if (status) row.status = status;
-    return dbRoot('PUT', '/leaderboard/' + sess.uid, row).then(function () {
+    var changed = nick.toLowerCase() !== String(st.nick || '').toLowerCase();
+    return (changed ? changeLogin(nick, pass) : Promise.resolve()).then(function () {
+      return dbRoot('PUT', '/leaderboard/' + sess.uid, row);
+    }).then(function () {
       return db('PATCH', '', { nick: nick, status: status });
     }).then(function () {
       sess.nick = st.nick = nick; myStatus = status; boardBest = best;
@@ -770,8 +802,9 @@
       box.querySelector('h2').textContent = 'ПРОФИЛЬ';
       var pn = el('input', { type: 'text', placeholder: 'Ник (3-16)', maxlength: '16', autocapitalize: 'none', spellcheck: 'false' });
       var ps = el('input', { type: 'text', placeholder: 'Статус (до 24 символов)', maxlength: '24', spellcheck: 'false' });
+      var pp = el('input', { type: 'password', placeholder: 'Пароль (только если меняешь ник)', autocomplete: 'current-password' });
       pn.value = st.nick || ''; ps.value = myStatus || '';
-      box.appendChild(pn); box.appendChild(ps);
+      box.appendChild(pn); box.appendChild(ps); box.appendChild(pp);
       box.appendChild(el('p', {}, 'Твой ID для друзей: ' + (myCode() || 'выдаётся…')));
       var rp = el('div', { 'class': 'row' });
       var bs = el('button', { 'class': 'main' }, 'СОХРАНИТЬ'), bc = el('button', {}, 'ЗАКРЫТЬ');
@@ -781,7 +814,7 @@
       bo.onclick = function () { logout(); st.msg = 'Ты вышел из аккаунта'; st.msgOk = true; st.mode = null; render(); };
       bs.onclick = function () {
         if (st.busy) return; st.busy = true; msg.className = 'msg ok'; msg.textContent = 'Сохраняю…';
-        saveProfile(pn.value, ps.value).then(function () {
+        saveProfile(pn.value, ps.value, pp.value).then(function () {
           st.busy = false; st.msg = 'Сохранено!'; st.msgOk = true; render(); }, failShow);
       };
       bc.onclick = hide;
@@ -1010,7 +1043,7 @@
   } else {
     sess = null;
   }
-})();</script><script src="splash/splash.js?v=1790920718"></script><script src="https://pygame-web.github.io/cdn/0.9.3/pythons.js" type=module id="site" data-python="python3.12" data-LINES=42 data-COLUMNS=132 data-os="vtx,snd,gui" async defer>#<!--
+})();</script><script src="splash/splash.js?v=1790921761"></script><script src="https://pygame-web.github.io/cdn/0.9.3/pythons.js" type=module id="site" data-python="python3.12" data-LINES=42 data-COLUMNS=132 data-os="vtx,snd,gui" async defer>#<!--
 
 print("""
 Loading olivertreemobile from olivertreemobile.apk
