@@ -862,8 +862,12 @@
   }
 
   function logout() {
-    sess = null; idToken = null; cloudScores = {}; boardBest = -1; myId = ''; myStatus = '';
+    sess = null; idToken = null; cloudScores = {}; cloudWallet = {}; boardBest = -1; myId = ''; myStatus = '';
     lsDel(KEY_SESS);
+    // иначе рекорды и кассеты вышедшего аккаунта остаются в localStorage, и sync() при входе
+    // в ДРУГОЙ аккаунт на этом же устройстве принимает их за «локальный прогресс устройства»
+    // и отправляет в облако уже туда — утечка и накрутка счёта между чужими аккаунтами
+    lsDel(KEY_SCORES); lsDel('oliver_wallet'); cookieSet(KEY_SCORES, '{}');
     st.in = false; st.nick = null; st.msg = '';
     st.rev++;
   }
