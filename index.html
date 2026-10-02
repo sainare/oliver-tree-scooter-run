@@ -1,4 +1,4 @@
-<html lang="en-us"><style>html,body{background:#000!important;margin:0}</style><script src="music_data.js?v=1790924288"></script><script>(function () {
+<html lang="en-us"><style>html,body{background:#000!important;margin:0}</style><script src="music_data.js?v=1790964078"></script><script>(function () {
   // pygbag при старте без касания пытается проиграть «пустой» звук и, получив
   // отказ браузера, показывает alert. Звук мы разблокируем сами по первому
   // касанию, поэтому это сообщение гасим (остальные alert не трогаем).
@@ -308,6 +308,10 @@
       if (isNaN(v) || ((parseInt(cfg.ver, 10) || 1) < 2 && v === 0)) {
         v = window.OT_LOAD_DEFAULT || 0;
       }
+      try {                         // песня по умолчанию от админа — если игрок свою не выбирал
+        var rp = JSON.parse(localStorage.getItem('oliver_remote_picks') || 'null');
+        if (rp && typeof rp.load === 'number' && !cfg.own_load && v === (window.OT_LOAD_DEFAULT || 0)) v = rp.load;
+      } catch (e) {}
       if (v > 0 && v <= keys.length) name = keys[v - 1];
       else {
         var last = null;
@@ -452,9 +456,20 @@
   }
 
   // облако + устройство: рекорды — лучшие из двух, стиль — из облака, если он там есть
+  // Рекорды, кассеты и стиль, что лежат на устройстве, принадлежат аккаунту, под которым их набрали
+  // (oliver_owner). Зашёл другой аккаунт — чужое стирается и в него не попадает. Гостевые данные
+  // (владельца нет) по-прежнему переходят в первый аккаунт, под который вошли.
+  function wipeLocal() {
+    lsDel(KEY_SCORES); cookieSet(KEY_SCORES, '{}'); lsDel('oliver_wallet');
+    var c = readJSON(KEY_CFG);
+    if (c && c.looks) { delete c.looks; lsSet(KEY_CFG, JSON.stringify(c)); }
+  }
   function sync() {
     return db('GET', '').then(function (cloud) {
       cloud = cloud || {};
+      var owner = lsGet('oliver_owner');
+      if (owner && owner !== sess.uid) wipeLocal();
+      lsSet('oliver_owner', sess.uid);
       cloudScores = cloud.scores || {};
       myStatus = String(cloud.status || '');
       myId = String(cloud.numId || '');
@@ -503,8 +518,8 @@
       if (walletGrew(mw, cw)) jobs.push(db('PUT', '/wallet', mw).then(function () { cloudWallet = mw; }));
       pushBoard(merged);
       fetchRequests();
-      return Promise.all(jobs);
-    }).then(function () { st.rev++; });
+      return Promise.all(jobs).then(function () { return applyGrants(); });
+    }).then(function () { st.rev++; showInbox(); });
   }
 
   var MSG = {
@@ -517,7 +532,7 @@
     NEED_PW: 'Чтобы сменить ник, введи пароль', BAD_PW: 'Неверный пароль',
     FR_HAVE: 'Вы уже друзья', FR_SHORT: 'ID друга — шесть цифр', FR_SELF: 'Это твой собственный ID', FR_NONE: 'Игрок с таким ID не найден',
     BAD_NUM: 'Рекорд — число от 0 до 99999999', EMPTY: 'Напиши сообщение', DB_401: 'Нет доступа (для чата нужна дружба)',
-    GOOGLE_BAD: 'Не удалось войти через Google', GOOGLE_POPUP: 'Разреши всплывающее окно и нажми ещё раз'
+    FR_SHORT2: '', GOOGLE_BAD: 'Не удалось войти через Google', GOOGLE_POPUP: 'Разреши всплывающее окно и нажми ещё раз'
   };
   function human(e) {
     var code = String((e && e.code) || (e && e.message) || '');
@@ -670,12 +685,95 @@
     for (k in cloudScores) b = Math.max(b, parseInt(cloudScores[k], 10) || 0);
     return b;
   }
+  // grants/{uid}/{id} пишет только админ (правила), claimed/{uid}/{id} — отметка «получено»,
+  // пишется один раз и только если выдача существует. Кассеты и предметы зачисляются в кошелёк
+  // одним атомарным запросом вместе с отметкой — повторно получить выдачу нельзя.
+  var inboxItems = [], defaultsRev = 0;
+  var ITEM_NAMES = { djump: 'двойной прыжок', hp: 'доп. жизнь' };
+  function applyGrants() {
+    return Promise.all([dbRoot('GET', '/grants/' + sess.uid), dbRoot('GET', '/claimed/' + sess.uid)]).then(function (r) {
+      var g = r[0] || {}, claimed = r[1] || {};
+      var ids = Object.keys(g).filter(function (k) { return !claimed[k] && g[k]; });
+      if (!ids.length) return null;
+      var mw = mergeWallet(readJSON('oliver_wallet') || {}, cloudWallet), add = 0, said = [], k;
+      ids.forEach(function (id) {
+        var x = g[id], n = Math.max(0, parseInt(x.tapes, 10) || 0);
+        add += n; if (n) said.push('+' + n + ' кассет');
+        for (k in (x.perm || {})) {
+          var lv = parseInt(x.perm[k], 10) || 0;
+          if (lv > (mw.perm[k] || 0)) { mw.perm[k] = lv; said.push((ITEM_NAMES[k] || k) + (lv > 1 ? ' ' + lv : '')); }
+        }
+      });
+      mw.tapes += add;
+      var upd = {};
+      upd['users/' + sess.uid + '/wallet'] = mw;
+      ids.forEach(function (id) { upd['claimed/' + sess.uid + '/' + id] = true; });
+      return dbRoot('PATCH', '/', upd).then(function () {
+        lsSet('oliver_wallet', JSON.stringify(mw)); cloudWallet = mw;
+        if (said.length) inboxItems.push({ text: 'Админ выдал тебе: ' + said.join(', ') });
+      });
+    }).catch(function () {}).then(function () {
+      return dbRoot('GET', '/inbox/' + sess.uid).then(function (m) {
+        Object.keys(m || {}).sort().forEach(function (id) {
+          if (m[id] && m[id].text) inboxItems.push({ id: id, text: String(m[id].text) });
+        });
+      }).catch(function () {});
+    });
+  }
+  function showInbox() {
+    if (!inboxItems.length) return;
+    st.mode = 'inbox';
+    if (st.open) render(); else show();
+  }
+  function adminFindUid(code) {
+    code = String(code || '').replace(/\D/g, '');
+    if (code.length !== 6) return Promise.reject(fail('FR_SHORT'));
+    return fetch(DB + '/ids/' + code + '.json').then(function (r) { return r.json(); }).then(function (u) {
+      if (!u || typeof u !== 'string') throw fail('FR_NONE');
+      return u;
+    });
+  }
+  function adminLoad(uid) {
+    return fetch(DB + '/leaderboard/' + uid + '.json').then(function (r) { return r.json(); }).then(function (e) {
+      if (e) return { uid: uid, nick: String(e.nick || '?'), best: parseInt(e.best, 10) || 0, status: String(e.status || '') };
+      return dbRoot('GET', '/users/' + uid + '/nick').then(function (n) {
+        return { uid: uid, nick: String(n || '?'), best: 0, status: '' };
+      });
+    });
+  }
+  function adminGrant(uid, tapes, perm) {
+    var g = { t: Date.now() };
+    tapes = parseInt(tapes, 10) || 0;
+    if (tapes < 0 || tapes > 10000000) return Promise.reject(fail('BAD_NUM'));
+    if (tapes) g.tapes = tapes;
+    if (perm && Object.keys(perm).length) g.perm = perm;
+    if (!g.tapes && !g.perm) return Promise.reject(fail('EMPTY'));
+    return dbRoot('POST', '/grants/' + uid, g);
+  }
+  function adminMessage(uid, text) {
+    text = String(text || '').trim().slice(0, 300);
+    if (!text) return Promise.reject(fail('EMPTY'));
+    return dbRoot('POST', '/inbox/' + uid, { text: text, t: Date.now() });
+  }
+  // песни по умолчанию для всех: config/defaultPicks {menu, select, game, load} (0 — случайная)
+  function adminDefaults(picks) {
+    return picks ? dbRoot('PUT', '/config/defaultPicks', picks) : dbRoot('DELETE', '/config/defaultPicks');
+  }
+  function fetchDefaults() {
+    fetch(DB + '/config/defaultPicks.json').then(function (r) { return r.ok ? r.json() : null; }).then(function (d) {
+      if (d && typeof d === 'object') lsSet('oliver_remote_picks', JSON.stringify(d)); else lsDel('oliver_remote_picks');
+      defaultsRev++; st.rev++;
+    }).catch(function () {});
+  }
   // ---- админ: uid игрока Kadronina зашит и в правилах базы (там настоящая защита);
   // здесь он только открывает кнопки. Админ правит рекорды, удаляет строки, обнуляет всё. ----
-  function isAdmin() { return !!(sess && sess.uid === String(C.adminUid || '')); }
+  function isAdmin() { return !!(sess && sess.uid === String(C.adminUid || 'gtmMmK9AMNSoOTDoWjmhYcTmOrh2')); }
   function adminSet(uid, nick, status, best) {
     best = parseInt(best, 10);
     if (!(best >= 0) || best >= 100000000) return Promise.reject(fail('BAD_NUM'));
+    nick = cleanNick(nick);
+    if (nick.length < 3 || nick.length > 16) return Promise.reject(fail('NICK_LEN'));
+    status = String(status || '').trim().slice(0, 24);
     var row = { nick: nick, best: best };
     if (status) row.status = status;
     return dbRoot('PUT', '/leaderboard/' + uid, row).then(function () { fetchTop(); });
@@ -862,8 +960,8 @@
   }
 
   function logout() {
-    sess = null; idToken = null; cloudScores = {}; boardBest = -1; myId = ''; myStatus = '';
-    lsDel(KEY_SESS);
+    sess = null; idToken = null; cloudScores = {}; cloudWallet = {}; boardBest = -1; myId = ''; myStatus = '';
+    lsDel(KEY_SESS); wipeLocal(); lsDel('oliver_owner'); resetCount++; inboxItems = [];
     st.in = false; st.nick = null; st.msg = '';
     st.rev++;
   }
@@ -1015,41 +1113,112 @@
       chatTimer = setInterval(pull, 3000);
       return;
     }
+    if (mode === 'inbox') {
+      box.querySelector('h2').textContent = 'СООБЩЕНИЯ';
+      inboxItems.forEach(function (m) {
+        box.appendChild(el('p', { style: 'text-align:left;background:#0f0a1a;border:2px solid #4e3e6c;padding:6px' }, m.text));
+      });
+      var ri = el('div', { 'class': 'row' }), bok = el('button', { 'class': 'main' }, 'ОК');
+      ri.appendChild(bok); box.appendChild(ri);
+      bok.onclick = function () {
+        var items = inboxItems; inboxItems = [];
+        items.forEach(function (m) { if (m.id) dbRoot('DELETE', '/inbox/' + sess.uid + '/' + m.id).catch(function () {}); });
+        hide();
+      };
+      return;
+    }
     if (mode === 'adminrow') {
-      var ar = null;
-      board.rows.forEach(function (r) { if (r.uid === st.arg) ar = r; });
-      box.querySelector('h2').textContent = ar ? ar.nick.toUpperCase() : 'ИГРОК';
-      box.appendChild(el('p', {}, 'Админ: рекорд в таблице сейчас ' + (ar ? ar.best : '?')));
-      var ab = el('input', { type: 'text', inputmode: 'numeric', pattern: '[0-9]*', placeholder: 'Новый рекорд', maxlength: '8', autocomplete: 'off' });
-      if (ar) ab.value = String(ar.best);
-      box.appendChild(ab);
-      var r1 = el('div', { 'class': 'row' });
-      var bset = el('button', { 'class': 'main' }, 'СОХРАНИТЬ'), bdel = el('button', {}, 'УДАЛИТЬ СТРОКУ');
-      r1.appendChild(bset); r1.appendChild(bdel); box.appendChild(r1);
-      var r2a = el('div', { 'class': 'row' }), bcl = el('button', {}, 'ЗАКРЫТЬ');
-      r2a.appendChild(bcl); box.appendChild(r2a); box.appendChild(msg);
-      var armed = false;
-      bset.onclick = function () {
-        if (!ar || st.busy) return; st.busy = true;
-        adminSet(ar.uid, ar.nick, ar.status, ab.value).then(function () {
-          st.busy = false; st.msg = 'Рекорд сохранён'; st.msgOk = true; hide(); }, failShow);
+      box.querySelector('h2').textContent = 'ИГРОК';
+      var pl = null, loading = el('p', {}, 'Загружаю…');
+      box.appendChild(loading); box.appendChild(msg);
+      adminLoad(st.arg).then(function (r) { pl = r; draw(); }, function (e) { loading.textContent = human(e); });
+      function draw() {
+        box.innerHTML = '';
+        box.appendChild(el('h2', {}, pl.nick.toUpperCase()));
+        box.appendChild(el('p', {}, 'Правка рекорда, ника и статуса (они видны в таблице)'));
+        var inN = el('input', { type: 'text', maxlength: '16', placeholder: 'Ник' }), inS = el('input', { type: 'text', maxlength: '24', placeholder: 'Статус' });
+        var inB = el('input', { type: 'text', inputmode: 'numeric', pattern: '[0-9]*', maxlength: '8', placeholder: 'Рекорд' });
+        inN.value = pl.nick; inS.value = pl.status; inB.value = String(pl.best);
+        box.appendChild(inN); box.appendChild(inS); box.appendChild(inB);
+        var rA = el('div', { 'class': 'row' }), bSave = el('button', { 'class': 'main' }, 'СОХРАНИТЬ'), bDel = el('button', {}, 'УДАЛИТЬ СТРОКУ');
+        rA.appendChild(bSave); rA.appendChild(bDel); box.appendChild(rA);
+        box.appendChild(el('p', {}, 'Выдать кассеты и предмет'));
+        var inT = el('input', { type: 'text', inputmode: 'numeric', pattern: '[0-9]*', maxlength: '8', placeholder: 'Кассет (сколько накинуть)' });
+        var sel = el('select', { style: 'width:100%;box-sizing:border-box;margin:4px 0;padding:8px;font-size:16px;background:#0f0a1a;color:#fff;border:2px solid #4e3e6c;font-family:monospace' });
+        [['', 'Предмет: не выдавать'], ['djump:1', 'Двойной прыжок'], ['hp:1', 'Доп. жизнь 1'], ['hp:2', 'Доп. жизнь 2'], ['hp:3', 'Доп. жизнь 3']].forEach(function (o) {
+          var op = el('option', { value: o[0] }, o[1]); sel.appendChild(op);
+        });
+        box.appendChild(inT); box.appendChild(sel);
+        var rG = el('div', { 'class': 'row' }), bGive = el('button', { 'class': 'main' }, 'ВЫДАТЬ');
+        rG.appendChild(bGive); box.appendChild(rG);
+        box.appendChild(el('p', {}, 'Сообщение игроку (увидит при входе)'));
+        var inM = el('input', { type: 'text', maxlength: '300', placeholder: 'Текст сообщения' });
+        box.appendChild(inM);
+        var rM = el('div', { 'class': 'row' }), bMsg = el('button', { 'class': 'main' }, 'ОТПРАВИТЬ'), bCl = el('button', {}, 'ЗАКРЫТЬ');
+        rM.appendChild(bMsg); rM.appendChild(bCl); box.appendChild(rM); box.appendChild(msg);
+        function done(text) { st.busy = false; msg.className = 'msg ok'; msg.textContent = text; }
+        function bad(e) { st.busy = false; msg.className = 'msg'; msg.textContent = human(e); }
+        function run(p, text) { if (st.busy) return; st.busy = true; p().then(function () { done(text); }, bad); }
+        bSave.onclick = function () { run(function () { return adminSet(pl.uid, inN.value, inS.value, inB.value); }, 'Сохранено'); };
+        var armed = false;
+        bDel.onclick = function () {
+          if (!armed) { armed = true; bDel.textContent = 'ТОЧНО? ЕЩЁ ТАП'; return; }
+          run(function () { return adminDelete(pl.uid); }, 'Строка удалена');
+        };
+        bGive.onclick = function () {
+          var perm = {}; if (sel.value) { var pr = sel.value.split(':'); perm[pr[0]] = parseInt(pr[1], 10); }
+          run(function () { return adminGrant(pl.uid, inT.value, perm); }, 'Выдано — игрок получит при входе');
+        };
+        bMsg.onclick = function () { run(function () { return adminMessage(pl.uid, inM.value).then(function () { inM.value = ''; }); }, 'Сообщение отправлено'); };
+        bCl.onclick = hide;
+      }
+      return;
+    }
+    if (mode === 'admindef') {
+      box.querySelector('h2').textContent = 'ПЕСНИ ПО УМОЛЧАНИЮ';
+      box.appendChild(el('p', {}, 'Номер песни из списка «МУЗЫКА» (1–16, 0 — случайная). Получат все, кто сам песню не выбирал.'));
+      var cur = readJSON('oliver_remote_picks') || {};
+      var defs = {};
+      [['menu', 'Меню'], ['select', 'Выбор персонажа'], ['game', 'Забег'], ['load', 'Загрузка']].forEach(function (c) {
+        var i = el('input', { type: 'text', inputmode: 'numeric', pattern: '[0-9]*', maxlength: '2', placeholder: c[1] + ' (0–16)' });
+        i.value = cur[c[0]] === undefined ? '' : String(cur[c[0]]);
+        box.appendChild(el('p', { style: 'margin:6px 0 0;text-align:left' }, c[1] + ':')); box.appendChild(i); defs[c[0]] = i;
+      });
+      var rD = el('div', { 'class': 'row' }), bDs = el('button', { 'class': 'main' }, 'СОХРАНИТЬ'), bDr = el('button', {}, 'СБРОСИТЬ');
+      rD.appendChild(bDs); rD.appendChild(bDr); box.appendChild(rD);
+      var rD2 = el('div', { 'class': 'row' }), bDc = el('button', {}, 'НАЗАД'); rD2.appendChild(bDc); box.appendChild(rD2); box.appendChild(msg);
+      bDs.onclick = function () {
+        var out = {}, any = false;
+        for (var k in defs) {
+          var t = defs[k].value.trim();
+          if (t === '') continue;
+          var n = parseInt(t, 10);
+          if (!(n >= 0 && n <= 16)) { msg.className = 'msg'; msg.textContent = 'Номер песни — от 0 до 16'; return; }
+          out[k] = n; any = true;
+        }
+        if (!any) { msg.className = 'msg'; msg.textContent = 'Впиши хотя бы один номер'; return; }
+        adminDefaults(out).then(function () { fetchDefaults(); msg.className = 'msg ok'; msg.textContent = 'Сохранено для всех'; }, failShow);
       };
-      bdel.onclick = function () {
-        if (!ar || st.busy) return;
-        if (!armed) { armed = true; bdel.textContent = 'ТОЧНО? ЕЩЁ ТАП'; return; }
-        st.busy = true;
-        adminDelete(ar.uid).then(function () { st.busy = false; hide(); }, failShow);
-      };
-      bcl.onclick = hide;
+      bDr.onclick = function () { adminDefaults(null).then(function () { fetchDefaults(); msg.className = 'msg ok'; msg.textContent = 'Сброшено: у всех песни по-старому'; }, failShow); };
+      bDc.onclick = function () { st.mode = 'adminpanel'; render(); };
       return;
     }
     if (mode === 'adminpanel') {
       box.querySelector('h2').textContent = 'АДМИН';
-      box.appendChild(el('p', {}, 'Тап по игроку в таблице — поменять его рекорд или удалить строку.'));
-      box.appendChild(el('p', {}, 'Кнопка ниже обнуляет рекорды и кассеты ВСЕХ игроков и очищает таблицу. Аккаунты и друзья остаются.'));
+      box.appendChild(el('p', {}, 'Игрок по ID (шесть цифр) — править рекорд, ник, статус, выдать кассеты и предметы, написать ему. Или тап по игроку в таблице.'));
+      var fid = el('input', { type: 'text', inputmode: 'numeric', pattern: '[0-9]*', maxlength: '6', placeholder: 'ID игрока', autocomplete: 'off' });
+      box.appendChild(fid);
+      var rF = el('div', { 'class': 'row' }), bFind = el('button', { 'class': 'main' }, 'НАЙТИ'), bSongs = el('button', {}, 'ПЕСНИ ПО УМОЛЧАНИЮ');
+      rF.appendChild(bFind); rF.appendChild(bSongs); box.appendChild(rF);
+      box.appendChild(el('p', {}, 'Обнулить рекорды и кассеты ВСЕХ игроков и очистить таблицу (аккаунты и друзья остаются).'));
       var r3a = el('div', { 'class': 'row' });
-      var bz1 = el('button', { 'class': 'main' }, 'ОБНУЛИТЬ ВСЁ'), bz2 = el('button', {}, 'ЗАКРЫТЬ');
+      var bz1 = el('button', {}, 'ОБНУЛИТЬ ВСЁ'), bz2 = el('button', { 'class': 'main' }, 'ЗАКРЫТЬ');
       r3a.appendChild(bz1); r3a.appendChild(bz2); box.appendChild(r3a); box.appendChild(msg);
+      bFind.onclick = function () {
+        if (st.busy) return; st.busy = true;
+        adminFindUid(fid.value).then(function (u) { st.busy = false; st.mode = 'adminrow'; st.arg = u; render(); }, failShow);
+      };
+      bSongs.onclick = function () { st.mode = 'admindef'; render(); };
       var arm2 = false;
       bz1.onclick = function () {
         if (st.busy) return;
@@ -1208,7 +1377,7 @@
     state: function () {
       return JSON.stringify({ available: true, in: st.in, nick: st.nick, busy: st.busy,
                               rev: st.rev, open: st.open, reset: resetCount, cfg: settingsRev,
-                              req: requests.rows.length, admin: isAdmin() });
+                              req: requests.rows.length, admin: isAdmin(), dp: defaultsRev });
     },
     isOpen: function () { return st.open; },
     board: function () { return JSON.stringify({ state: board.state, rows: board.rows, me: st.nick }); },
@@ -1235,6 +1404,7 @@
     },
     fetchFriends: fetchFriends,
     fetchRequests: fetchRequests,
+    defaults: function () { return lsGet('oliver_remote_picks') || '{}'; },
     openMode: function (mode, arg) { st.mode = mode; st.arg = arg || null; show(); },
     // настройки изменили: через пару секунд (чтобы не слать на каждый тап) уходят в облако
     pushSettings: function (json) {
@@ -1265,6 +1435,7 @@
   };
 
   checkReset();
+  fetchDefaults();
   // уже входил на этом устройстве — тихо подтягиваем облако при запуске
   sess = readJSON(KEY_SESS);
   if (sess && sess.uid && sess.refresh) {
@@ -1273,7 +1444,7 @@
   } else {
     sess = null;
   }
-})();</script><script src="splash/splash.js?v=1790924288"></script><script src="https://pygame-web.github.io/cdn/0.9.3/pythons.js" type=module id="site" data-python="python3.12" data-LINES=42 data-COLUMNS=132 data-os="vtx,snd,gui" async defer>#<!--
+})();</script><script src="splash/splash.js?v=1790964078"></script><script src="https://pygame-web.github.io/cdn/0.9.3/pythons.js" type=module id="site" data-python="python3.12" data-LINES=42 data-COLUMNS=132 data-os="vtx,snd,gui" async defer>#<!--
 
 print("""
 Loading olivertreemobile from olivertreemobile.apk
