@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="ru">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Вход через Google</title>
+<body style="margin:0;background:#1e1430;color:#fafafc;font:16px monospace;text-align:center;padding:36px 16px">
+<h2 style="color:#fcd63c">OLIVER TREE RUN</h2>
+<p id="m">Заканчиваю вход…</p>
+<p><a id="go" style="display:none;color:#fcd63c;border:2px solid #fcd63c;padding:12px 20px;text-decoration:none;font-weight:bold">ОТКРЫТЬ ИГРУ</a></p>
+<script>
+(function () {
+  // Google возвращает сюда id_token во фрагменте адреса (после #). Сайт и
+  // приложение получают его по-разному: state=web — через localStorage (тот же
+  // сайт, окно закрывается само), state=app — ссылкой olivertree://auth для приложения.
+  var h = new URLSearchParams(location.hash.slice(1));
+  var t = h.get('id_token'), s = h.get('state'), m = document.getElementById('m');
+  history.replaceState(null, '', location.pathname);       // токен не остаётся в адресной строке
+  if (!t || !/^[A-Za-z0-9_.\-]+$/.test(t)) {
+    m.textContent = 'Вход через Google не удался. Вернись в игру и попробуй ещё раз.';
+    return;
+  }
+  if (s === 'app') {
+    var link = 'olivertree://auth?id_token=' + t;
+    m.textContent = 'Готово! Возвращаемся в игру…';
+    var a = document.getElementById('go');
+    a.href = link;
+    a.style.display = 'inline-block';
+    location.href = link;
+  } else {
+    try { localStorage.setItem('oliver_idt', t); } catch (e) {}
+    m.textContent = 'Готово! Это окно можно закрыть.';
+    setTimeout(function () { window.close(); }, 700);
+  }
+})();
+</script>
+</body>
+</html>

@@ -1,4 +1,4 @@
-<html lang="en-us"><style>html,body{background:#000!important;margin:0}</style><script src="music_data.js?v=1790914117"></script><script>(function () {
+<html lang="en-us"><style>html,body{background:#000!important;margin:0}</style><script src="music_data.js?v=1790915376"></script><script>(function () {
   // pygbag при старте без касания пытается проиграть «пустой» звук и, получив
   // отказ браузера, показывает alert. Звук мы разблокируем сами по первому
   // касанию, поэтому это сообщение гасим (остальные alert не трогаем).
@@ -339,15 +339,17 @@
     });
     if (document.hidden) window.otMusic.bgPause(); else window.otMusic.bgResume();
   });
-})();</script><script>window.OT_FIREBASE={"apiKey": "AIzaSyCIFdffiBYJUKoQCLadQHOpPW_xNlJqlgM", "databaseURL": "https://oliver-tree-run-default-rtdb.europe-west1.firebasedatabase.app"};
+})();</script><script>window.OT_FIREBASE={"apiKey": "AIzaSyCIFdffiBYJUKoQCLadQHOpPW_xNlJqlgM", "databaseURL": "https://oliver-tree-run-default-rtdb.europe-west1.firebasedatabase.app", "googleClientId": "1061937909578-ce8go4maago1bil3ba0galmdh0oalpf4.apps.googleusercontent.com", "authPage": "https://sainare.github.io/oliver-tree-scooter-run/auth.html"};
 (function () {
   'use strict';
   var C = window.OT_FIREBASE;
   if (!C) { window.otAccount = { available: false, state: function () { return '{"available":false}'; },
-                                 isOpen: function () { return false; } }; return; }
+                                 isOpen: function () { return false; },
+                                 board: function () { return '{"state":"off"}'; }, fetchTop: function () {} }; return; }
   var AUTH = C.authBase || 'https://identitytoolkit.googleapis.com/v1';
   var TOKEN = C.tokenBase || 'https://securetoken.googleapis.com/v1';
   var DB = String(C.databaseURL).replace(/\/+$/, '');
+  var GOOGLE = C.googleClientId && C.authPage ? { id: C.googleClientId, page: C.authPage } : null;
   var KEY_SESS = 'oliver_acc', KEY_SCORES = 'oliver_scores', KEY_CFG = 'oliver_cfg';
   var st = { available: true, in: false, nick: null, busy: false, msg: '', rev: 0, open: false };
   var sess = null, idToken = null, idUntil = 0, cloudScores = {}, root = null;
@@ -407,6 +409,41 @@
     });
   }
 
+  function dbRoot(method, path, body) {
+    return token().then(function (t) {
+      return fetch(DB + path + '.json?auth=' + encodeURIComponent(t), {
+        method: method, headers: { 'Content-Type': 'application/json' },
+        body: body === undefined ? undefined : JSON.stringify(body) });
+    }).then(function (r) {
+      if (!r.ok) throw fail('DB_' + r.status);
+      return r.json();
+    });
+  }
+  // таблица лидеров: лучший рекорд игрока (среди всех персонажей) + ник; читать может любой
+  var boardBest = -1, board = { state: 'idle', rows: [] };
+  function pushBoard(scores) {
+    if (!sess) return;
+    var best = 0, k;
+    for (k in scores) best = Math.max(best, parseInt(scores[k], 10) || 0);
+    if (best <= 0 || best <= boardBest) return;
+    dbRoot('PUT', '/leaderboard/' + sess.uid, { nick: sess.nick, best: best })
+      .then(function () { boardBest = best; }, function () {});
+  }
+  function fetchTop() {
+    board.state = 'loading';
+    fetch(DB + '/leaderboard.json?orderBy=%22best%22&limitToLast=30')
+      .then(function (r) { if (!r.ok) throw fail('HTTP_' + r.status); return r.json(); })
+      .then(function (j) {
+        var rows = [];
+        for (var u in (j || {})) {
+          var e = j[u];
+          if (e && typeof e.best === 'number' && e.nick) rows.push({ nick: String(e.nick), best: e.best });
+        }
+        rows.sort(function (a, b) { return b.best - a.best; });
+        board = { state: 'ok', rows: rows };
+      }, function () { board = { state: 'error', rows: [] }; });
+  }
+
   // облако + устройство: рекорды — лучшие из двух, стиль — из облака, если он там есть
   function sync() {
     return db('GET', '').then(function (cloud) {
@@ -439,6 +476,7 @@
       } else {
         jobs.push(db('PUT', '/nick', sess.nick));
       }
+      pushBoard(merged);
       return Promise.all(jobs);
     }).then(function () { st.rev++; });
   }
@@ -449,7 +487,8 @@
     WEAK_PASSWORD: 'Пароль — минимум 6 символов', NICK_LEN: 'Ник — от 3 до 16 символов',
     NICK_CHARS: 'В нике только буквы, цифры, пробел и _ . -',
     TOO_MANY_ATTEMPTS_TRY_LATER: 'Слишком много попыток, попробуй позже',
-    USER_DISABLED: 'Аккаунт отключён', OFFLINE: 'Нет интернета'
+    USER_DISABLED: 'Аккаунт отключён', OFFLINE: 'Нет интернета',
+    GOOGLE_BAD: 'Не удалось войти через Google', GOOGLE_POPUP: 'Разреши всплывающее окно и нажми ещё раз'
   };
   function human(e) {
     var code = String((e && e.code) || (e && e.message) || '');
@@ -475,8 +514,63 @@
       return sync();
     });
   }
+  // ---- вход через Google: в браузере — окно Google и возврат на auth.html (тот же
+  // сайт, токен приходит через localStorage); в приложении — системный браузер
+  // и возврат по ссылке olivertree://auth?id_token=... ----
+  function b64json(part) {
+    try { return JSON.parse(decodeURIComponent(escape(atob(part.replace(/-/g, '+').replace(/_/g, '/'))))); }
+    catch (e) { return null; }
+  }
+  function googleNick(name, uid) {
+    var n = String(name || '').replace(/[^0-9A-Za-zА-Яа-яЁё _.\-]/g, '').replace(/\s+/g, ' ').trim().slice(0, 16).trim();
+    return n.length >= 3 ? n : ('Игрок' + String(uid).slice(0, 4));
+  }
+  function googleStart() {
+    var isApp = !!(window.OTNative && window.OTNative.openUrl);
+    var nonce = Array.prototype.map.call(crypto.getRandomValues(new Uint8Array(16)), function (b) {
+      return ('0' + b.toString(16)).slice(-2); }).join('');
+    lsSet('oliver_gnonce', nonce);
+    var url = 'https://accounts.google.com/o/oauth2/v2/auth?client_id=' + encodeURIComponent(GOOGLE.id) +
+      '&redirect_uri=' + encodeURIComponent(GOOGLE.page) + '&response_type=id_token' +
+      '&scope=' + encodeURIComponent('openid email profile') + '&nonce=' + nonce +
+      '&prompt=select_account&state=' + (isApp ? 'app' : 'web');
+    if (isApp) { window.OTNative.openUrl(url); return 'app'; }
+    return window.open(url, 'ot-google', 'width=480,height=660') ? 'web' : 'blocked';
+  }
+  function googleLogin(idt) {
+    var p = String(idt).split('.');
+    var claims = p.length === 3 ? b64json(p[1]) : null;
+    if (!GOOGLE || !claims || !claims.nonce || claims.nonce !== lsGet('oliver_gnonce') ||
+        String(claims.aud) !== GOOGLE.id) return Promise.reject(fail('GOOGLE_BAD'));
+    lsDel('oliver_gnonce');
+    return post(AUTH + '/accounts:signInWithIdp?key=' + C.apiKey,
+      { postBody: 'id_token=' + encodeURIComponent(idt) + '&providerId=google.com',
+        requestUri: 'http://localhost', returnIdpCredential: true, returnSecureToken: true }).then(function (j) {
+      var nick = googleNick(j.displayName, j.localId);
+      sess = { uid: j.localId, nick: nick, refresh: j.refreshToken };
+      idToken = j.idToken;
+      idUntil = Date.now() + (parseInt(j.expiresIn, 10) - 60) * 1000;
+      lsSet(KEY_SESS, JSON.stringify(sess));
+      st.in = true; st.nick = nick;
+      return sync();
+    });
+  }
+  function onGoogleToken(idt) {
+    st.busy = true; st.msg = 'Вхожу через Google…'; st.msgOk = true; if (root) render();
+    googleLogin(idt).then(function () {
+      st.busy = false; st.msg = 'Готово!'; st.msgOk = true; if (root) render();
+    }, function (e) {
+      st.busy = false;
+      if (!st.in) { st.msg = human(e); st.msgOk = false; } else { st.msg = 'Вошёл, но не удалось обновить данные'; st.msgOk = false; }
+      if (root) render();
+    });
+  }
+  window.addEventListener('storage', function (e) {
+    if (e.key === 'oliver_idt' && e.newValue) { lsDel('oliver_idt'); onGoogleToken(e.newValue); }
+  });
+
   function logout() {
-    sess = null; idToken = null; cloudScores = {};
+    sess = null; idToken = null; cloudScores = {}; boardBest = -1;
     lsDel(KEY_SESS);
     st.in = false; st.nick = null; st.msg = '';
     st.rev++;
@@ -529,6 +623,18 @@
       return;
     }
     box.appendChild(el('p', {}, 'Войди, чтобы рекорды и стиль хранились в аккаунте и были общими на сайте и в приложении.'));
+    if (GOOGLE) {
+      var bG = el('button', { 'class': 'main', style: 'width:100%;margin-bottom:6px' }, 'ВОЙТИ ЧЕРЕЗ GOOGLE');
+      bG.onclick = function () {
+        if (st.busy) return;
+        var how = googleStart();
+        msg.className = 'msg' + (how === 'blocked' ? '' : ' ok');
+        msg.textContent = how === 'blocked' ? human(fail('GOOGLE_POPUP'))
+          : (how === 'app' ? 'Выбери аккаунт в браузере и вернись в игру' : 'Выбери аккаунт в открывшемся окне');
+      };
+      box.appendChild(bG);
+      box.appendChild(el('p', {}, 'или ник и пароль:'));
+    }
     var nick = el('input', { type: 'text', placeholder: 'Ник', maxlength: '16', autocomplete: 'username',
                              autocapitalize: 'none', spellcheck: 'false' });
     var pass = el('input', { type: 'password', placeholder: 'Пароль (от 6 символов)', autocomplete: 'current-password' });
@@ -599,8 +705,11 @@
                               rev: st.rev, open: st.open });
     },
     isOpen: function () { return st.open; },
+    board: function () { return JSON.stringify({ state: board.state, rows: board.rows, me: st.nick }); },
+    fetchTop: fetchTop,
     open: show,
     close: hide,
+    googleToken: onGoogleToken,
     // новый рекорд: в облако уходят только те, что выше уже сохранённых там
     pushScores: function (json) {
       if (!sess) return;
@@ -608,6 +717,7 @@
       try { s = JSON.parse(json) || {}; } catch (e) { return; }
       for (k in s) if ((parseInt(s[k], 10) || 0) > (cloudScores[k] || 0)) up[k] = parseInt(s[k], 10);
       if (!Object.keys(up).length) return;
+      pushBoard(s);
       db('PATCH', '/scores', up).then(function () {
         for (var u in up) cloudScores[u] = up[u];
       }, function () { sync().catch(function () {}); });   // в облаке уже больше — сверимся
@@ -630,7 +740,7 @@
   } else {
     sess = null;
   }
-})();</script><script src="splash/splash.js?v=1790914117"></script><script src="https://pygame-web.github.io/cdn/0.9.3/pythons.js" type=module id="site" data-python="python3.12" data-LINES=42 data-COLUMNS=132 data-os="vtx,snd,gui" async defer>#<!--
+})();</script><script src="splash/splash.js?v=1790915376"></script><script src="https://pygame-web.github.io/cdn/0.9.3/pythons.js" type=module id="site" data-python="python3.12" data-LINES=42 data-COLUMNS=132 data-os="vtx,snd,gui" async defer>#<!--
 
 print("""
 Loading olivertreemobile from olivertreemobile.apk
