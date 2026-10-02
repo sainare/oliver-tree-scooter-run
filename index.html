@@ -1,4 +1,4 @@
-<html lang="en-us"><style>html,body{background:#000!important;margin:0}</style><script src="music_data.js?v=1790964078"></script><script>(function () {
+<html lang="en-us"><style>html,body{background:#000!important;margin:0}</style><script src="music_data.js?v=1790966280"></script><script>(function () {
   // pygbag при старте без касания пытается проиграть «пустой» звук и, получив
   // отказ браузера, показывает alert. Звук мы разблокируем сами по первому
   // касанию, поэтому это сообщение гасим (остальные alert не трогаем).
@@ -980,6 +980,7 @@
     '#ot-acc button{flex:1;padding:10px 4px;font-size:14px;font-weight:bold;background:#1e1430;' +
     'color:#fafafc;border:2px solid #fafafc;font-family:monospace}' +
     '#ot-acc button.main{color:#fcd63c;border-color:#fcd63c}' +
+    '#ot-acc button.danger{color:#ff5a6e;border-color:#ff5a6e}' +
     '#ot-acc button:disabled{opacity:.5}' +
     '#ot-acc .msg{min-height:16px;margin-top:6px;color:#ff8a9a;font-size:13px}' +
     '#ot-acc .ok{color:#7ee08a}' +
@@ -1011,7 +1012,7 @@
       box.querySelector('h2').textContent = 'ПРОФИЛЬ';
       var pn = el('input', { type: 'text', placeholder: 'Ник (3-16)', maxlength: '16', autocapitalize: 'none', spellcheck: 'false' });
       var ps = el('input', { type: 'text', placeholder: 'Статус (до 24 символов)', maxlength: '24', spellcheck: 'false' });
-      var pp = el('input', { type: 'password', placeholder: 'Пароль (только если меняешь ник)', autocomplete: 'current-password' });
+      var pp = el('input', { type: 'password', placeholder: 'Пароль', autocomplete: 'current-password' });
       pn.value = st.nick || ''; ps.value = myStatus || '';
       box.appendChild(pn); box.appendChild(ps); box.appendChild(pp);
       box.appendChild(el('p', {}, 'Твой ID для друзей: ' + (myCode() || 'выдаётся…')));
@@ -1020,7 +1021,7 @@
       var bo = el('button', {}, 'ВЫЙТИ');
       rp.appendChild(bs); rp.appendChild(bc); box.appendChild(rp);
       var rq = el('div', { 'class': 'row' }); rq.appendChild(bo); box.appendChild(rq); box.appendChild(msg);
-      bo.onclick = function () { logout(); st.msg = 'Ты вышел из аккаунта'; st.msgOk = true; st.mode = null; render(); };
+      bo.onclick = function () { st.mode = 'logout'; render(); };
       bs.onclick = function () {
         if (st.busy) return; st.busy = true; msg.className = 'msg ok'; msg.textContent = 'Сохраняю…';
         saveProfile(pn.value, ps.value, pp.value).then(function () {
@@ -1067,6 +1068,16 @@
       return;
     }
     chatStop();
+    if (mode === 'logout') {
+      box.querySelector('h2').textContent = 'ВЫЙТИ?';
+      box.appendChild(el('p', {}, 'Выйти из аккаунта «' + (st.nick || '') + '»? Рекорды, кассеты и стиль остаются в облаке — войдёшь снова, и всё вернётся.'));
+      var rl = el('div', { 'class': 'row' });
+      var bYes = el('button', { 'class': 'danger' }, 'ВЫЙТИ'), bNo = el('button', { 'class': 'main' }, 'ОТМЕНА');
+      rl.appendChild(bYes); rl.appendChild(bNo); box.appendChild(rl);
+      bYes.onclick = function () { logout(); st.msg = ''; hide(); };
+      bNo.onclick = hide;
+      return;
+    }
     if (mode === 'chat') {
       var cf = null;
       friends.rows.forEach(function (r) { if (r.uid === st.arg) cf = r; });
@@ -1254,7 +1265,7 @@
       box.appendChild(el('p', {}, 'Рекорды и стиль персонажа хранятся в аккаунте — они общие на сайте и в приложении.'));
       var row = el('div', { 'class': 'row' });
       var out = el('button', {}, 'ВЫЙТИ'), close = el('button', { 'class': 'main' }, 'ГОТОВО');
-      out.onclick = function () { logout(); st.msg = 'Ты вышел из аккаунта'; st.msgOk = true; render(); };
+      out.onclick = function () { st.mode = 'logout'; render(); };
       close.onclick = hide;
       row.appendChild(out); row.appendChild(close);
       box.appendChild(row); box.appendChild(msg);
@@ -1275,7 +1286,7 @@
     }
     var nick = el('input', { type: 'text', placeholder: 'Ник', maxlength: '16', autocomplete: 'username',
                              autocapitalize: 'none', spellcheck: 'false' });
-    var pass = el('input', { type: 'password', placeholder: 'Пароль (от 6 символов)', autocomplete: 'current-password' });
+    var pass = el('input', { type: 'password', placeholder: 'Пароль', autocomplete: 'current-password' });
     nick.value = st.lastNick || '';
     box.appendChild(nick); box.appendChild(pass);
     var row1 = el('div', { 'class': 'row' });
@@ -1444,7 +1455,7 @@
   } else {
     sess = null;
   }
-})();</script><script src="splash/splash.js?v=1790964078"></script><script src="https://pygame-web.github.io/cdn/0.9.3/pythons.js" type=module id="site" data-python="python3.12" data-LINES=42 data-COLUMNS=132 data-os="vtx,snd,gui" async defer>#<!--
+})();</script><script src="splash/splash.js?v=1790966280"></script><script src="https://pygame-web.github.io/cdn/0.9.3/pythons.js" type=module id="site" data-python="python3.12" data-LINES=42 data-COLUMNS=132 data-os="vtx,snd,gui" async defer>#<!--
 
 print("""
 Loading olivertreemobile from olivertreemobile.apk
