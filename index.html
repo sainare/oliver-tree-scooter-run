@@ -1,4 +1,4 @@
-<html lang="en-us"><style>html,body{background:#000!important;margin:0}</style><script src="music_data.js?v=1790917986"></script><script>(function () {
+<html lang="en-us"><style>html,body{background:#000!important;margin:0}</style><script src="music_data.js?v=1790920648"></script><script>(function () {
   // pygbag при старте без касания пытается проиграть «пустой» звук и, получив
   // отказ браузера, показывает alert. Звук мы разблокируем сами по первому
   // касанию, поэтому это сообщение гасим (остальные alert не трогаем).
@@ -346,7 +346,7 @@
   if (!C) { window.otAccount = { available: false, state: function () { return '{"available":false}'; },
                                  isOpen: function () { return false; },
                                  board: function () { return '{"state":"off"}'; }, fetchTop: function () {},
-                                 pushWallet: function () {},
+                                 pushWallet: function () {}, pushSettings: function () {},
                                  social: function () { return '{"in":false}'; }, fetchFriends: function () {},
                                  openMode: function () {} }; return; }
   var AUTH = C.authBase || 'https://identitytoolkit.googleapis.com/v1';
@@ -424,7 +424,8 @@
   }
   // таблица лидеров: лучший рекорд игрока (среди всех персонажей) + ник; читать может любой
   var boardBest = -1, board = { state: 'idle', rows: [] }, cloudWallet = {};
-  var friends = { state: 'idle', rows: [] }, myStatus = '', resetCount = 0;
+  var friends = { state: 'idle', rows: [] }, myStatus = '', resetCount = 0, myId = '', claiming = false;
+  var settingsRev = 0, settingsTimer = null;
   function pushBoard(scores) {
     if (!sess) return;
     var best = 0, k;
@@ -456,6 +457,8 @@
       cloud = cloud || {};
       cloudScores = cloud.scores || {};
       myStatus = String(cloud.status || '');
+      myId = String(cloud.numId || '');
+      if (!myId) claimId();
       var local = readJSON(KEY_SCORES) || {}, merged = {}, up = {}, k;
       [cloudScores, local].forEach(function (src) {
         for (k in src) {
@@ -483,6 +486,16 @@
       } else {
         jobs.push(db('PUT', '/nick', sess.nick));
       }
+      // настройки игры: в облаке уже есть — берём их (профиль едет вместе с игроком),
+      // нет — отправляем настройки этого устройства. Стиль персонажей едет отдельно (looks)
+      var lc = readJSON(KEY_CFG) || {};
+      if (cloud.settings && typeof cloud.settings === 'object') {
+        for (var sk in cloud.settings) if (sk !== 'looks' && sk !== 'ver') lc[sk] = cloud.settings[sk];
+        lsSet(KEY_CFG, JSON.stringify(lc));
+        settingsRev++;
+      } else if (Object.keys(lc).length) {
+        jobs.push(db('PUT', '/settings', cleanSettings(lc)));
+      }
       var cw = cloud.wallet || {};
       var mw = mergeWallet(readJSON('oliver_wallet') || {}, cw);   // всё только растёт: берём большее
       lsSet('oliver_wallet', JSON.stringify(mw));
@@ -500,8 +513,7 @@
     NICK_CHARS: 'В нике только буквы, цифры, пробел и _ . -',
     TOO_MANY_ATTEMPTS_TRY_LATER: 'Слишком много попыток, попробуй позже',
     USER_DISABLED: 'Аккаунт отключён', OFFLINE: 'Нет интернета',
-    FR_SHORT: 'Введи код друга полностью', FR_SELF: 'Это твой собственный код', FR_NONE: 'Игрок с таким кодом не найден',
-    FR_MANY: 'Код неоднозначный — введи его целиком',
+    FR_SHORT: 'ID друга — шесть цифр', FR_SELF: 'Это твой собственный ID', FR_NONE: 'Игрок с таким ID не найден',
     GOOGLE_BAD: 'Не удалось войти через Google', GOOGLE_POPUP: 'Разреши всплывающее окно и нажми ещё раз'
   };
   function human(e) {
@@ -621,8 +633,34 @@
     return false;
   }
 
+  // ---- настройки игры в облаке ----
+  function cleanSettings(c) {
+    var o = {}, k;
+    for (k in c) if (k !== 'looks' && k !== 'ver' && /^[A-Za-z0-9_]+$/.test(k)) {
+      var v = c[k];
+      if (typeof v === 'number' || typeof v === 'boolean') o[k] = v;
+    }
+    return o;
+  }
+
   // ---- профиль и друзья ----
-  function myCode() { return sess ? String(sess.uid).slice(0, 8) : ''; }
+  // числовой ID игрока (шесть цифр) — его друзья вводят вместо длинного кода.
+  // Занимается случайный свободный номер в ids/{номер} = uid (правила базы не дают
+  // перезаписать чужой), и записывается в users/{uid}/numId.
+  function myCode() { return myId; }
+  function claimId() {
+    if (claiming || !sess) return;
+    claiming = true;
+    var tries = 0;
+    (function attempt() {
+      var n = String(100000 + Math.floor(Math.random() * 900000));
+      dbRoot('PUT', '/ids/' + n, sess.uid).then(function () {
+        return db('PUT', '/numId', n).then(function () { myId = n; claiming = false; st.rev++; });
+      }, function (e) {
+        if (++tries < 12 && !deadAccount(e)) attempt(); else claiming = false;   // занят — берём другой
+      });
+    })();
+  }
   function localBest() {
     var b = 0, k, s = readJSON(KEY_SCORES) || {};
     for (k in s) b = Math.max(b, parseInt(s[k], 10) || 0);
@@ -646,16 +684,19 @@
     }, function (e) { if (!deadAccount(e)) friends = { state: 'error', rows: [] }; });
   }
   function addFriend(code) {
-    code = String(code || '').trim();
-    if (code.length < 6) return Promise.reject(fail('FR_SHORT'));
+    code = String(code || '').replace(/\D/g, '');
+    if (code.length !== 6) return Promise.reject(fail('FR_SHORT'));
     if (code === myCode()) return Promise.reject(fail('FR_SELF'));
-    var q = '?orderBy=%22%24key%22&startAt=' + encodeURIComponent('"' + code + '"') +
-            '&endAt=' + encodeURIComponent('"' + code + '\uf8ff"');
-    return fetch(DB + '/leaderboard.json' + q).then(function (r) { return r.json(); }).then(function (j) {
-      var ids = Object.keys(j || {});
-      if (ids.length !== 1) throw fail(ids.length ? 'FR_MANY' : 'FR_NONE');
-      if (ids[0] === sess.uid) throw fail('FR_SELF');
-      return db('PUT', '/friends/' + ids[0], true).then(function () { fetchFriends(); return j[ids[0]].nick; });
+    return fetch(DB + '/ids/' + code + '.json').then(function (r) {
+      if (!r.ok) throw fail('HTTP_' + r.status);
+      return r.json();
+    }).then(function (uid) {
+      if (!uid || typeof uid !== 'string') throw fail('FR_NONE');
+      if (uid === sess.uid) throw fail('FR_SELF');
+      return db('PUT', '/friends/' + uid, true).then(function () {
+        fetchFriends();
+        return friendRow(uid).then(function (r) { return r.nick; });
+      });
     });
   }
   function removeFriend(uid) {
@@ -678,7 +719,7 @@
   }
 
   function logout() {
-    sess = null; idToken = null; cloudScores = {}; boardBest = -1;
+    sess = null; idToken = null; cloudScores = {}; boardBest = -1; myId = ''; myStatus = '';
     lsDel(KEY_SESS);
     st.in = false; st.nick = null; st.msg = '';
     st.rev++;
@@ -731,10 +772,13 @@
       var ps = el('input', { type: 'text', placeholder: 'Статус (до 24 символов)', maxlength: '24', spellcheck: 'false' });
       pn.value = st.nick || ''; ps.value = myStatus || '';
       box.appendChild(pn); box.appendChild(ps);
-      box.appendChild(el('p', {}, 'Твой код для друзей: ' + myCode()));
+      box.appendChild(el('p', {}, 'Твой ID для друзей: ' + (myCode() || 'выдаётся…')));
       var rp = el('div', { 'class': 'row' });
       var bs = el('button', { 'class': 'main' }, 'СОХРАНИТЬ'), bc = el('button', {}, 'ЗАКРЫТЬ');
-      rp.appendChild(bs); rp.appendChild(bc); box.appendChild(rp); box.appendChild(msg);
+      var bo = el('button', {}, 'ВЫЙТИ');
+      rp.appendChild(bs); rp.appendChild(bc); box.appendChild(rp);
+      var rq = el('div', { 'class': 'row' }); rq.appendChild(bo); box.appendChild(rq); box.appendChild(msg);
+      bo.onclick = function () { logout(); st.msg = 'Ты вышел из аккаунта'; st.msgOk = true; st.mode = null; render(); };
       bs.onclick = function () {
         if (st.busy) return; st.busy = true; msg.className = 'msg ok'; msg.textContent = 'Сохраняю…';
         saveProfile(pn.value, ps.value).then(function () {
@@ -745,8 +789,8 @@
     }
     if (mode === 'addfriend') {
       box.querySelector('h2').textContent = 'ДОБАВИТЬ ДРУГА';
-      var fc = el('input', { type: 'text', placeholder: 'Код друга', maxlength: '28', autocapitalize: 'none', spellcheck: 'false' });
-      box.appendChild(el('p', {}, 'Попроси друга открыть «Лидеры → Профиль» и прислать код.'));
+      var fc = el('input', { type: 'text', inputmode: 'numeric', pattern: '[0-9]*', placeholder: 'ID друга (6 цифр)', maxlength: '6', autocomplete: 'off', spellcheck: 'false' });
+      box.appendChild(el('p', {}, 'Попроси друга открыть «Лидеры → Профиль» и прислать свой ID.'));
       box.appendChild(fc);
       var rf = el('div', { 'class': 'row' });
       var ba = el('button', { 'class': 'main' }, 'ДОБАВИТЬ'), bx = el('button', {}, 'ЗАКРЫТЬ');
@@ -830,36 +874,70 @@
     bClose.onclick = hide;
     pass.onkeydown = function (e) { if (e.key === 'Enter') go(false); };
   }
+  // Окно живёт в отдельном iframe: у игры (SDL) свои обработчики клавиш и касаний на
+  // всей странице, они отбирали фокус у полей ввода и «съедали» набор. В iframe
+  // у окна свой документ, события игры до него не доходят.
+  var frame = null, fdoc = null;
+  // при появлении клавиатуры страница меняет размер, и игра в ответ зовёт window.focus() —
+  // фокус слетал с поля ввода. Пока окно открыто, этот вызов ничего не делает.
+  var origWindowFocus = window.focus;
+  window.focus = function () { if (st.open) return; return origWindowFocus.apply(this, arguments); };
   function show() {
     if (!root) {
-      var s = el('style'); s.textContent = CSS; document.head.appendChild(s);
-      root = el('div', { id: 'ot-acc' });
-      root.appendChild(el('div', { 'class': 'box' }));
-      // клавиши и касания в окне не должны доходить до игры под ним
-      ['keydown', 'keyup', 'keypress', 'pointerdown', 'pointerup', 'mousedown', 'mouseup',
-       'touchstart', 'touchend', 'click'].forEach(function (t) {
-        root.addEventListener(t, function (e) { e.stopPropagation(); }, false);
+      frame = document.createElement('iframe');
+      frame.id = 'ot-acc-frame';
+      frame.setAttribute('allowtransparency', 'true');
+      frame.style.cssText = 'position:fixed;left:0;top:0;width:100%;height:100%;border:0;' +
+        'z-index:2147483646;background:transparent;color-scheme:normal';
+      document.body.appendChild(frame);
+      fdoc = frame.contentDocument;
+      fdoc.open();
+      fdoc.write('<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">' +
+                 '<style>html,body{margin:0;background:transparent}' + CSS + '</style>' +
+                 '<div id="ot-acc"><div class="box"></div></div>');
+      fdoc.close();
+      root = fdoc.getElementById('ot-acc');
+      // тёмный фон закрывает окно, только если и нажатие, и отпускание были по фону:
+      // когда окно «подпрыгивает» над клавиатурой, клик по полю не должен его закрыть
+      var downOnBg = false;
+      ['mousedown', 'touchstart', 'pointerdown'].forEach(function (t) {
+        root.addEventListener(t, function (e) { downOnBg = (e.target === root); }, true);
       });
-      root.addEventListener('click', function (e) { if (e.target === root) hide(); });
+      root.addEventListener('click', function (e) {
+        if (e.target === root && downOnBg) hide();
+        downOnBg = false;
+      });
       root.addEventListener('focusin', function (e) {
         if (e.target.tagName === 'INPUT') { root.classList.add('kb'); }
       });
       root.addEventListener('focusout', function () {
         setTimeout(function () {
-          if (!root.contains(document.activeElement) || document.activeElement.tagName !== 'INPUT') root.classList.remove('kb');
+          var a = fdoc.activeElement;
+          if (!a || a.tagName !== 'INPUT') root.classList.remove('kb');
         }, 150);
       });
-      document.body.appendChild(root);
     }
     st.msg = ''; st.msgOk = false;
     render();
+    // пока окно открыто, холст игры не может забрать фокус у полей ввода
+    [].forEach.call(document.querySelectorAll('canvas'), function (cv) {
+      if (cv.getAttribute('data-ot-tab') === null) cv.setAttribute('data-ot-tab', cv.getAttribute('tabindex') === null ? '-' : cv.getAttribute('tabindex'));
+      cv.removeAttribute('tabindex'); cv.inert = true; cv.style.pointerEvents = 'none';
+    });
+    frame.style.display = 'block';
     root.style.display = 'flex';
     st.open = true;
+    try { frame.contentWindow.focus(); } catch (e) {}      // клавиатура теперь идёт в окно, а не в игру
   }
   function hide() {
     st.mode = null;
-    if (root) root.style.display = 'none';
-    try { document.activeElement && document.activeElement.blur(); } catch (e) {}
+    if (frame) frame.style.display = 'none';
+    [].forEach.call(document.querySelectorAll('canvas'), function (cv) {
+      var t = cv.getAttribute('data-ot-tab');
+      if (t === '-') cv.removeAttribute('tabindex'); else if (t !== null) cv.setAttribute('tabindex', t);
+      cv.removeAttribute('data-ot-tab'); cv.inert = false; cv.style.pointerEvents = '';
+    });
+    try { fdoc && fdoc.activeElement && fdoc.activeElement.blur(); } catch (e) {}
     st.open = false;
     try { window.focus(); var cv = document.querySelector('canvas'); if (cv) cv.focus(); } catch (e) {}
   }
@@ -868,7 +946,7 @@
     available: true,
     state: function () {
       return JSON.stringify({ available: true, in: st.in, nick: st.nick, busy: st.busy,
-                              rev: st.rev, open: st.open, reset: resetCount });
+                              rev: st.rev, open: st.open, reset: resetCount, cfg: settingsRev });
     },
     isOpen: function () { return st.open; },
     board: function () { return JSON.stringify({ state: board.state, rows: board.rows, me: st.nick }); },
@@ -895,6 +973,16 @@
     },
     fetchFriends: fetchFriends,
     openMode: function (mode, arg) { st.mode = mode; st.arg = arg || null; show(); },
+    // настройки изменили: через пару секунд (чтобы не слать на каждый тап) уходят в облако
+    pushSettings: function (json) {
+      var c;
+      try { c = JSON.parse(json); } catch (e) { return; }
+      if (!sess) return;
+      clearTimeout(settingsTimer);
+      settingsTimer = setTimeout(function () {
+        if (sess) db('PUT', '/settings', cleanSettings(c)).catch(function () {});
+      }, 1500);
+    },
     pushWallet: function (json) {
       var w;
       try { w = JSON.parse(json); } catch (e) { return; }
@@ -922,7 +1010,7 @@
   } else {
     sess = null;
   }
-})();</script><script src="splash/splash.js?v=1790917986"></script><script src="https://pygame-web.github.io/cdn/0.9.3/pythons.js" type=module id="site" data-python="python3.12" data-LINES=42 data-COLUMNS=132 data-os="vtx,snd,gui" async defer>#<!--
+})();</script><script src="splash/splash.js?v=1790920648"></script><script src="https://pygame-web.github.io/cdn/0.9.3/pythons.js" type=module id="site" data-python="python3.12" data-LINES=42 data-COLUMNS=132 data-os="vtx,snd,gui" async defer>#<!--
 
 print("""
 Loading olivertreemobile from olivertreemobile.apk
