@@ -1,4 +1,4 @@
-<html lang="en-us"><style>html,body{background:#000!important;margin:0}</style><script src="music_data.js?v=1790915866"></script><script>(function () {
+<html lang="en-us"><style>html,body{background:#000!important;margin:0}</style><script src="music_data.js?v=1790917986"></script><script>(function () {
   // pygbag при старте без касания пытается проиграть «пустой» звук и, получив
   // отказ браузера, показывает alert. Звук мы разблокируем сами по первому
   // касанию, поэтому это сообщение гасим (остальные alert не трогаем).
@@ -346,7 +346,9 @@
   if (!C) { window.otAccount = { available: false, state: function () { return '{"available":false}'; },
                                  isOpen: function () { return false; },
                                  board: function () { return '{"state":"off"}'; }, fetchTop: function () {},
-                                 pushTapes: function () {} }; return; }
+                                 pushWallet: function () {},
+                                 social: function () { return '{"in":false}'; }, fetchFriends: function () {},
+                                 openMode: function () {} }; return; }
   var AUTH = C.authBase || 'https://identitytoolkit.googleapis.com/v1';
   var TOKEN = C.tokenBase || 'https://securetoken.googleapis.com/v1';
   var DB = String(C.databaseURL).replace(/\/+$/, '');
@@ -391,7 +393,7 @@
   function token() {
     if (idToken && Date.now() < idUntil) return Promise.resolve(idToken);
     return post(TOKEN + '/token?key=' + C.apiKey, 'grant_type=refresh_token&refresh_token=' +
-                encodeURIComponent(sess.refresh), true).then(function (j) {
+                encodeURIComponent(sess.refresh), true).catch(function (e) { deadAccount(e); throw e; }).then(function (j) {
       idToken = j.id_token;
       idUntil = Date.now() + (parseInt(j.expires_in, 10) - 60) * 1000;
       sess.refresh = j.refresh_token;
@@ -421,13 +423,16 @@
     });
   }
   // таблица лидеров: лучший рекорд игрока (среди всех персонажей) + ник; читать может любой
-  var boardBest = -1, board = { state: 'idle', rows: [] }, cloudTapes = 0;
+  var boardBest = -1, board = { state: 'idle', rows: [] }, cloudWallet = {};
+  var friends = { state: 'idle', rows: [] }, myStatus = '', resetCount = 0;
   function pushBoard(scores) {
     if (!sess) return;
     var best = 0, k;
     for (k in scores) best = Math.max(best, parseInt(scores[k], 10) || 0);
-    if (best <= 0 || best <= boardBest) return;
-    dbRoot('PUT', '/leaderboard/' + sess.uid, { nick: sess.nick, best: best })
+    if (best <= boardBest) return;
+    var row = { nick: sess.nick, best: best };
+    if (myStatus) row.status = myStatus;
+    dbRoot('PUT', '/leaderboard/' + sess.uid, row)
       .then(function () { boardBest = best; }, function () {});
   }
   function fetchTop() {
@@ -438,7 +443,7 @@
         var rows = [];
         for (var u in (j || {})) {
           var e = j[u];
-          if (e && typeof e.best === 'number' && e.nick) rows.push({ nick: String(e.nick), best: e.best });
+          if (e && typeof e.best === 'number' && e.best > 0 && e.nick) rows.push({ nick: String(e.nick), best: e.best, status: String(e.status || '') });
         }
         rows.sort(function (a, b) { return b.best - a.best; });
         board = { state: 'ok', rows: rows };
@@ -450,6 +455,7 @@
     return db('GET', '').then(function (cloud) {
       cloud = cloud || {};
       cloudScores = cloud.scores || {};
+      myStatus = String(cloud.status || '');
       var local = readJSON(KEY_SCORES) || {}, merged = {}, up = {}, k;
       [cloudScores, local].forEach(function (src) {
         for (k in src) {
@@ -477,11 +483,11 @@
       } else {
         jobs.push(db('PUT', '/nick', sess.nick));
       }
-      var lt = parseInt(lsGet('oliver_tapes'), 10) || 0, ct = parseInt(cloud.tapes, 10) || 0;
-      var tm = Math.max(lt, ct);           // валюта только копится: берём большее из двух
-      if (tm !== lt) lsSet('oliver_tapes', String(tm));
-      cloudTapes = ct;
-      if (tm > ct) jobs.push(db('PUT', '/tapes', tm).then(function () { cloudTapes = tm; }));
+      var cw = cloud.wallet || {};
+      var mw = mergeWallet(readJSON('oliver_wallet') || {}, cw);   // всё только растёт: берём большее
+      lsSet('oliver_wallet', JSON.stringify(mw));
+      cloudWallet = cw;
+      if (walletGrew(mw, cw)) jobs.push(db('PUT', '/wallet', mw).then(function () { cloudWallet = mw; }));
       pushBoard(merged);
       return Promise.all(jobs);
     }).then(function () { st.rev++; });
@@ -494,6 +500,8 @@
     NICK_CHARS: 'В нике только буквы, цифры, пробел и _ . -',
     TOO_MANY_ATTEMPTS_TRY_LATER: 'Слишком много попыток, попробуй позже',
     USER_DISABLED: 'Аккаунт отключён', OFFLINE: 'Нет интернета',
+    FR_SHORT: 'Введи код друга полностью', FR_SELF: 'Это твой собственный код', FR_NONE: 'Игрок с таким кодом не найден',
+    FR_MANY: 'Код неоднозначный — введи его целиком',
     GOOGLE_BAD: 'Не удалось войти через Google', GOOGLE_POPUP: 'Разреши всплывающее окно и нажми ещё раз'
   };
   function human(e) {
@@ -575,6 +583,100 @@
     if (e.key === 'oliver_idt' && e.newValue) { lsDel('oliver_idt'); onGoogleToken(e.newValue); }
   });
 
+  // ---- сброс: номер сброса в облаке (config/resetEpoch) больше сохранённого у игрока ->
+  // рекорды и кассеты на этом устройстве обнуляются, а закрытый аккаунт разлогинивается ----
+  function checkReset() {
+    fetch(DB + '/config/resetEpoch.json').then(function (r) { return r.ok ? r.json() : null; }).then(function (e) {
+      e = parseInt(e, 10);
+      if (!e) return;
+      var mine = parseInt(lsGet('oliver_epoch'), 10) || 0;
+      if (e <= mine) return;
+      lsSet('oliver_epoch', String(e));
+      lsDel(KEY_SCORES); lsDel('oliver_wallet'); cookieSet(KEY_SCORES, '{}');
+      cloudScores = {}; cloudWallet = {}; boardBest = -1;
+      if (sess) logout();
+      resetCount++; st.rev++;
+    }).catch(function () {});
+  }
+  function deadAccount(e) {
+    var c = String((e && e.code) || (e && e.message) || '');
+    if (/INVALID_REFRESH_TOKEN|USER_NOT_FOUND|TOKEN_EXPIRED|USER_DISABLED/.test(c)) { logout(); return true; }
+    return false;
+  }
+
+  // ---- кошелёк: кассеты, потраченное и вечные покупки (все числа только растут) ----
+  function mergeWallet(a, b) {
+    a = a || {}; b = b || {};
+    var out = { tapes: Math.max(parseInt(a.tapes, 10) || 0, parseInt(b.tapes, 10) || 0),
+                spent: Math.max(parseInt(a.spent, 10) || 0, parseInt(b.spent, 10) || 0), perm: {} };
+    [a.perm || {}, b.perm || {}].forEach(function (p) {
+      for (var k in p) out.perm[k] = Math.max(out.perm[k] || 0, parseInt(p[k], 10) || 0);
+    });
+    return out;
+  }
+  function walletGrew(a, b) {
+    b = b || {};
+    if ((a.tapes || 0) > (parseInt(b.tapes, 10) || 0) || (a.spent || 0) > (parseInt(b.spent, 10) || 0)) return true;
+    for (var k in (a.perm || {})) if (a.perm[k] > ((b.perm || {})[k] || 0)) return true;
+    return false;
+  }
+
+  // ---- профиль и друзья ----
+  function myCode() { return sess ? String(sess.uid).slice(0, 8) : ''; }
+  function localBest() {
+    var b = 0, k, s = readJSON(KEY_SCORES) || {};
+    for (k in s) b = Math.max(b, parseInt(s[k], 10) || 0);
+    for (k in cloudScores) b = Math.max(b, parseInt(cloudScores[k], 10) || 0);
+    return b;
+  }
+  function friendRow(u) {
+    return fetch(DB + '/leaderboard/' + u + '.json').then(function (r) { return r.json(); }).then(function (e) {
+      return e ? { uid: u, nick: String(e.nick || '?'), best: parseInt(e.best, 10) || 0, status: String(e.status || '') }
+               : { uid: u, nick: '?', best: 0, status: '' };
+    }).catch(function () { return { uid: u, nick: '?', best: 0, status: '' }; });
+  }
+  function fetchFriends() {
+    if (!sess) { friends = { state: 'off', rows: [] }; return; }
+    friends = { state: 'loading', rows: [] };
+    db('GET', '/friends').then(function (f) {
+      return Promise.all(Object.keys(f || {}).map(friendRow));
+    }).then(function (rows) {
+      rows.sort(function (a, b) { return b.best - a.best; });
+      friends = { state: 'ok', rows: rows };
+    }, function (e) { if (!deadAccount(e)) friends = { state: 'error', rows: [] }; });
+  }
+  function addFriend(code) {
+    code = String(code || '').trim();
+    if (code.length < 6) return Promise.reject(fail('FR_SHORT'));
+    if (code === myCode()) return Promise.reject(fail('FR_SELF'));
+    var q = '?orderBy=%22%24key%22&startAt=' + encodeURIComponent('"' + code + '"') +
+            '&endAt=' + encodeURIComponent('"' + code + '\uf8ff"');
+    return fetch(DB + '/leaderboard.json' + q).then(function (r) { return r.json(); }).then(function (j) {
+      var ids = Object.keys(j || {});
+      if (ids.length !== 1) throw fail(ids.length ? 'FR_MANY' : 'FR_NONE');
+      if (ids[0] === sess.uid) throw fail('FR_SELF');
+      return db('PUT', '/friends/' + ids[0], true).then(function () { fetchFriends(); return j[ids[0]].nick; });
+    });
+  }
+  function removeFriend(uid) {
+    return db('DELETE', '/friends/' + uid).then(function () { fetchFriends(); });
+  }
+  function saveProfile(nick, status) {
+    nick = cleanNick(nick); status = String(status || '').trim().slice(0, 24);
+    if (nick.length < 3 || nick.length > 16) return Promise.reject(fail('NICK_LEN'));
+    if (!/^[0-9A-Za-zА-Яа-яЁё _.\-]+$/.test(nick)) return Promise.reject(fail('NICK_CHARS'));
+    var best = Math.max(localBest(), boardBest, 0);
+    var row = { nick: nick, best: best };
+    if (status) row.status = status;
+    return dbRoot('PUT', '/leaderboard/' + sess.uid, row).then(function () {
+      return db('PATCH', '', { nick: nick, status: status });
+    }).then(function () {
+      sess.nick = st.nick = nick; myStatus = status; boardBest = best;
+      lsSet(KEY_SESS, JSON.stringify(sess));
+      st.rev++;
+    });
+  }
+
   function logout() {
     sess = null; idToken = null; cloudScores = {}; boardBest = -1;
     lsDel(KEY_SESS);
@@ -617,6 +719,63 @@
     box.innerHTML = '';
     box.appendChild(el('h2', {}, 'АККАУНТ'));
     var msg = el('div', { 'class': 'msg' + (st.msgOk ? ' ok' : '') }, st.msg || '');
+    var mode = st.in ? (st.mode || 'account') : 'account';
+    function failShow(e) {
+      st.busy = false;
+      if (deadAccount(e)) { render(); return; }
+      msg.className = 'msg'; msg.textContent = human(e);
+    }
+    if (mode === 'profile') {
+      box.querySelector('h2').textContent = 'ПРОФИЛЬ';
+      var pn = el('input', { type: 'text', placeholder: 'Ник (3-16)', maxlength: '16', autocapitalize: 'none', spellcheck: 'false' });
+      var ps = el('input', { type: 'text', placeholder: 'Статус (до 24 символов)', maxlength: '24', spellcheck: 'false' });
+      pn.value = st.nick || ''; ps.value = myStatus || '';
+      box.appendChild(pn); box.appendChild(ps);
+      box.appendChild(el('p', {}, 'Твой код для друзей: ' + myCode()));
+      var rp = el('div', { 'class': 'row' });
+      var bs = el('button', { 'class': 'main' }, 'СОХРАНИТЬ'), bc = el('button', {}, 'ЗАКРЫТЬ');
+      rp.appendChild(bs); rp.appendChild(bc); box.appendChild(rp); box.appendChild(msg);
+      bs.onclick = function () {
+        if (st.busy) return; st.busy = true; msg.className = 'msg ok'; msg.textContent = 'Сохраняю…';
+        saveProfile(pn.value, ps.value).then(function () {
+          st.busy = false; st.msg = 'Сохранено!'; st.msgOk = true; render(); }, failShow);
+      };
+      bc.onclick = hide;
+      return;
+    }
+    if (mode === 'addfriend') {
+      box.querySelector('h2').textContent = 'ДОБАВИТЬ ДРУГА';
+      var fc = el('input', { type: 'text', placeholder: 'Код друга', maxlength: '28', autocapitalize: 'none', spellcheck: 'false' });
+      box.appendChild(el('p', {}, 'Попроси друга открыть «Лидеры → Профиль» и прислать код.'));
+      box.appendChild(fc);
+      var rf = el('div', { 'class': 'row' });
+      var ba = el('button', { 'class': 'main' }, 'ДОБАВИТЬ'), bx = el('button', {}, 'ЗАКРЫТЬ');
+      rf.appendChild(ba); rf.appendChild(bx); box.appendChild(rf); box.appendChild(msg);
+      ba.onclick = function () {
+        if (st.busy) return; st.busy = true; msg.className = 'msg ok'; msg.textContent = 'Ищу…';
+        addFriend(fc.value).then(function (nick) {
+          st.busy = false; st.msg = 'Друг добавлен: ' + nick; st.msgOk = true; render(); }, failShow);
+      };
+      bx.onclick = hide;
+      return;
+    }
+    if (mode === 'friend') {
+      var fr = null;
+      friends.rows.forEach(function (r) { if (r.uid === st.arg) fr = r; });
+      box.querySelector('h2').textContent = fr ? fr.nick.toUpperCase() : 'ДРУГ';
+      if (fr) {
+        box.appendChild(el('p', {}, 'Лучший рекорд: ' + fr.best));
+        if (fr.status) box.appendChild(el('p', {}, '«' + fr.status + '»'));
+      }
+      var rr = el('div', { 'class': 'row' });
+      var bd = el('button', {}, 'УДАЛИТЬ ИЗ ДРУЗЕЙ'), bk = el('button', { 'class': 'main' }, 'ЗАКРЫТЬ');
+      rr.appendChild(bd); rr.appendChild(bk); box.appendChild(rr); box.appendChild(msg);
+      bd.onclick = function () {
+        removeFriend(st.arg).then(hide, function () { msg.className = 'msg'; msg.textContent = 'Нет интернета'; });
+      };
+      bk.onclick = hide;
+      return;
+    }
     if (st.in) {
       box.appendChild(el('p', {}, 'Ты вошёл как ' + st.nick + '.'));
       box.appendChild(el('p', {}, 'Рекорды и стиль персонажа хранятся в аккаунте — они общие на сайте и в приложении.'));
@@ -698,6 +857,7 @@
     st.open = true;
   }
   function hide() {
+    st.mode = null;
     if (root) root.style.display = 'none';
     try { document.activeElement && document.activeElement.blur(); } catch (e) {}
     st.open = false;
@@ -708,7 +868,7 @@
     available: true,
     state: function () {
       return JSON.stringify({ available: true, in: st.in, nick: st.nick, busy: st.busy,
-                              rev: st.rev, open: st.open });
+                              rev: st.rev, open: st.open, reset: resetCount });
     },
     isOpen: function () { return st.open; },
     board: function () { return JSON.stringify({ state: board.state, rows: board.rows, me: st.nick }); },
@@ -728,11 +888,20 @@
         for (var u in up) cloudScores[u] = up[u];
       }, function () { sync().catch(function () {}); });   // в облаке уже больше — сверимся
     },
-    pushTapes: function (n) {
-      n = parseInt(n, 10) || 0;
-      if (!sess || n <= cloudTapes) return;
-      cloudTapes = n;
-      db('PUT', '/tapes', n).catch(function () { cloudTapes = 0; });
+    // экран «Лидеры / Друзья / Профиль» в игре
+    social: function () {
+      return JSON.stringify({ friends: friends, in: st.in, me: { nick: st.nick, status: myStatus, code: myCode(),
+                              best: Math.max(localBest(), boardBest, 0) } });
+    },
+    fetchFriends: fetchFriends,
+    openMode: function (mode, arg) { st.mode = mode; st.arg = arg || null; show(); },
+    pushWallet: function (json) {
+      var w;
+      try { w = JSON.parse(json); } catch (e) { return; }
+      if (!sess || !walletGrew(w, cloudWallet)) return;
+      var prev = cloudWallet;
+      cloudWallet = mergeWallet(w, prev);
+      db('PUT', '/wallet', cloudWallet).catch(function () { cloudWallet = prev; });
     },
     pushLooks: function (json) {
       if (!sess) return;
@@ -744,6 +913,7 @@
     _debug: function () { return JSON.stringify({ sess: !!sess, cloudScores: cloudScores }); }
   };
 
+  checkReset();
   // уже входил на этом устройстве — тихо подтягиваем облако при запуске
   sess = readJSON(KEY_SESS);
   if (sess && sess.uid && sess.refresh) {
@@ -752,7 +922,7 @@
   } else {
     sess = null;
   }
-})();</script><script src="splash/splash.js?v=1790915866"></script><script src="https://pygame-web.github.io/cdn/0.9.3/pythons.js" type=module id="site" data-python="python3.12" data-LINES=42 data-COLUMNS=132 data-os="vtx,snd,gui" async defer>#<!--
+})();</script><script src="splash/splash.js?v=1790917986"></script><script src="https://pygame-web.github.io/cdn/0.9.3/pythons.js" type=module id="site" data-python="python3.12" data-LINES=42 data-COLUMNS=132 data-os="vtx,snd,gui" async defer>#<!--
 
 print("""
 Loading olivertreemobile from olivertreemobile.apk
