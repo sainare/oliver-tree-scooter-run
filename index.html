@@ -1,4 +1,4 @@
-<html lang="en-us"><style>html,body{background:#000!important;margin:0}</style><script src="music_data.js?v=1790915689"></script><script>(function () {
+<html lang="en-us"><style>html,body{background:#000!important;margin:0}</style><script src="music_data.js?v=1790915866"></script><script>(function () {
   // pygbag при старте без касания пытается проиграть «пустой» звук и, получив
   // отказ браузера, показывает alert. Звук мы разблокируем сами по первому
   // касанию, поэтому это сообщение гасим (остальные alert не трогаем).
@@ -345,7 +345,8 @@
   var C = window.OT_FIREBASE;
   if (!C) { window.otAccount = { available: false, state: function () { return '{"available":false}'; },
                                  isOpen: function () { return false; },
-                                 board: function () { return '{"state":"off"}'; }, fetchTop: function () {} }; return; }
+                                 board: function () { return '{"state":"off"}'; }, fetchTop: function () {},
+                                 pushTapes: function () {} }; return; }
   var AUTH = C.authBase || 'https://identitytoolkit.googleapis.com/v1';
   var TOKEN = C.tokenBase || 'https://securetoken.googleapis.com/v1';
   var DB = String(C.databaseURL).replace(/\/+$/, '');
@@ -420,7 +421,7 @@
     });
   }
   // таблица лидеров: лучший рекорд игрока (среди всех персонажей) + ник; читать может любой
-  var boardBest = -1, board = { state: 'idle', rows: [] };
+  var boardBest = -1, board = { state: 'idle', rows: [] }, cloudTapes = 0;
   function pushBoard(scores) {
     if (!sess) return;
     var best = 0, k;
@@ -476,6 +477,11 @@
       } else {
         jobs.push(db('PUT', '/nick', sess.nick));
       }
+      var lt = parseInt(lsGet('oliver_tapes'), 10) || 0, ct = parseInt(cloud.tapes, 10) || 0;
+      var tm = Math.max(lt, ct);           // валюта только копится: берём большее из двух
+      if (tm !== lt) lsSet('oliver_tapes', String(tm));
+      cloudTapes = ct;
+      if (tm > ct) jobs.push(db('PUT', '/tapes', tm).then(function () { cloudTapes = tm; }));
       pushBoard(merged);
       return Promise.all(jobs);
     }).then(function () { st.rev++; });
@@ -722,6 +728,12 @@
         for (var u in up) cloudScores[u] = up[u];
       }, function () { sync().catch(function () {}); });   // в облаке уже больше — сверимся
     },
+    pushTapes: function (n) {
+      n = parseInt(n, 10) || 0;
+      if (!sess || n <= cloudTapes) return;
+      cloudTapes = n;
+      db('PUT', '/tapes', n).catch(function () { cloudTapes = 0; });
+    },
     pushLooks: function (json) {
       if (!sess) return;
       var l = {};
@@ -740,7 +752,7 @@
   } else {
     sess = null;
   }
-})();</script><script src="splash/splash.js?v=1790915689"></script><script src="https://pygame-web.github.io/cdn/0.9.3/pythons.js" type=module id="site" data-python="python3.12" data-LINES=42 data-COLUMNS=132 data-os="vtx,snd,gui" async defer>#<!--
+})();</script><script src="splash/splash.js?v=1790915866"></script><script src="https://pygame-web.github.io/cdn/0.9.3/pythons.js" type=module id="site" data-python="python3.12" data-LINES=42 data-COLUMNS=132 data-os="vtx,snd,gui" async defer>#<!--
 
 print("""
 Loading olivertreemobile from olivertreemobile.apk
