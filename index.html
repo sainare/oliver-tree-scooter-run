@@ -1,4 +1,4 @@
-<html lang="en-us"><style>html,body{background:#000!important;margin:0}</style><script src="music_data.js?v=1790860331"></script><script>(function () {
+<html lang="en-us"><style>html,body{background:#000!important;margin:0}</style><script src="music_data.js?v=1790914117"></script><script>(function () {
   // pygbag при старте без касания пытается проиграть «пустой» звук и, получив
   // отказ браузера, показывает alert. Звук мы разблокируем сами по первому
   // касанию, поэтому это сообщение гасим (остальные alert не трогаем).
@@ -339,7 +339,298 @@
     });
     if (document.hidden) window.otMusic.bgPause(); else window.otMusic.bgResume();
   });
-})();</script><script src="splash/splash.js?v=1790860331"></script><script src="https://pygame-web.github.io/cdn/0.9.3/pythons.js" type=module id="site" data-python="python3.12" data-LINES=42 data-COLUMNS=132 data-os="vtx,snd,gui" async defer>#<!--
+})();</script><script>window.OT_FIREBASE={"apiKey": "AIzaSyCIFdffiBYJUKoQCLadQHOpPW_xNlJqlgM", "databaseURL": "https://oliver-tree-run-default-rtdb.europe-west1.firebasedatabase.app"};
+(function () {
+  'use strict';
+  var C = window.OT_FIREBASE;
+  if (!C) { window.otAccount = { available: false, state: function () { return '{"available":false}'; },
+                                 isOpen: function () { return false; } }; return; }
+  var AUTH = C.authBase || 'https://identitytoolkit.googleapis.com/v1';
+  var TOKEN = C.tokenBase || 'https://securetoken.googleapis.com/v1';
+  var DB = String(C.databaseURL).replace(/\/+$/, '');
+  var KEY_SESS = 'oliver_acc', KEY_SCORES = 'oliver_scores', KEY_CFG = 'oliver_cfg';
+  var st = { available: true, in: false, nick: null, busy: false, msg: '', rev: 0, open: false };
+  var sess = null, idToken = null, idUntil = 0, cloudScores = {}, root = null;
+
+  function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+  function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+  function lsDel(k) { try { localStorage.removeItem(k); } catch (e) {} }
+  function readJSON(k) { try { return JSON.parse(lsGet(k) || 'null'); } catch (e) { return null; } }
+  function cookieSet(name, value) {
+    try {
+      var p = location.pathname; p = p.slice(0, p.lastIndexOf('/') + 1) || '/';
+      document.cookie = name + '=' + encodeURIComponent(value) + '; max-age=' + (400 * 86400) +
+        '; path=' + p + '; SameSite=Lax; Secure';
+    } catch (e) {}
+  }
+  function cleanNick(n) { return String(n || '').trim().replace(/\s+/g, ' '); }
+  function sha1(text) {
+    return crypto.subtle.digest('SHA-1', new TextEncoder().encode(text)).then(function (buf) {
+      return Array.prototype.map.call(new Uint8Array(buf), function (b) {
+        return ('0' + b.toString(16)).slice(-2); }).join('');
+    });
+  }
+  function emailOf(nick) {
+    return sha1(cleanNick(nick).toLowerCase()).then(function (h) {
+      return 'u' + h.slice(0, 32) + '@olivertree.game'; });
+  }
+  function fail(code) { var e = new Error(code); e.code = code; return e; }
+  function post(url, body, form) {
+    return fetch(url, { method: 'POST', body: form ? body : JSON.stringify(body),
+      headers: { 'Content-Type': form ? 'application/x-www-form-urlencoded' : 'application/json' } })
+      .then(function (r) {
+        return r.json().catch(function () { return {}; }).then(function (j) {
+          if (!r.ok) throw fail((j.error && j.error.message) || ('HTTP_' + r.status));
+          return j;
+        });
+      });
+  }
+  function token() {
+    if (idToken && Date.now() < idUntil) return Promise.resolve(idToken);
+    return post(TOKEN + '/token?key=' + C.apiKey, 'grant_type=refresh_token&refresh_token=' +
+                encodeURIComponent(sess.refresh), true).then(function (j) {
+      idToken = j.id_token;
+      idUntil = Date.now() + (parseInt(j.expires_in, 10) - 60) * 1000;
+      sess.refresh = j.refresh_token;
+      lsSet(KEY_SESS, JSON.stringify(sess));
+      return idToken;
+    });
+  }
+  function db(method, path, body) {
+    return token().then(function (t) {
+      return fetch(DB + '/users/' + sess.uid + path + '.json?auth=' + encodeURIComponent(t), {
+        method: method, headers: { 'Content-Type': 'application/json' },
+        body: body === undefined ? undefined : JSON.stringify(body) });
+    }).then(function (r) {
+      if (!r.ok) throw fail('DB_' + r.status);
+      return r.json();
+    });
+  }
+
+  // облако + устройство: рекорды — лучшие из двух, стиль — из облака, если он там есть
+  function sync() {
+    return db('GET', '').then(function (cloud) {
+      cloud = cloud || {};
+      cloudScores = cloud.scores || {};
+      var local = readJSON(KEY_SCORES) || {}, merged = {}, up = {}, k;
+      [cloudScores, local].forEach(function (src) {
+        for (k in src) {
+          var v = parseInt(src[k], 10) || 0;
+          if (!(k in merged) || v > merged[k]) merged[k] = v;
+        }
+      });
+      var data = JSON.stringify(merged);
+      lsSet(KEY_SCORES, data);
+      cookieSet(KEY_SCORES, data);
+      for (k in merged) if ((cloudScores[k] || 0) < merged[k]) up[k] = merged[k];
+      var cfg = readJSON(KEY_CFG) || {};
+      var jobs = [];
+      if (Object.keys(up).length) jobs.push(db('PATCH', '/scores', up).then(function () {
+        for (var u in up) cloudScores[u] = up[u]; }));
+      if (cloud.looks && typeof cloud.looks === 'object') {
+        cfg.looks = cloud.looks;
+        lsSet(KEY_CFG, JSON.stringify(cfg));
+      } else if (cfg.looks && Object.keys(cfg.looks).length) {
+        jobs.push(db('PUT', '/looks', cfg.looks));
+      }
+      if (cloud.nick) {                 // ник как при создании, а не как набрали сейчас
+        sess.nick = st.nick = String(cloud.nick);
+        lsSet(KEY_SESS, JSON.stringify(sess));
+      } else {
+        jobs.push(db('PUT', '/nick', sess.nick));
+      }
+      return Promise.all(jobs);
+    }).then(function () { st.rev++; });
+  }
+
+  var MSG = {
+    EMAIL_EXISTS: 'Такой ник уже занят', EMAIL_NOT_FOUND: 'Неверный ник или пароль',
+    INVALID_PASSWORD: 'Неверный ник или пароль', INVALID_LOGIN_CREDENTIALS: 'Неверный ник или пароль',
+    WEAK_PASSWORD: 'Пароль — минимум 6 символов', NICK_LEN: 'Ник — от 3 до 16 символов',
+    NICK_CHARS: 'В нике только буквы, цифры, пробел и _ . -',
+    TOO_MANY_ATTEMPTS_TRY_LATER: 'Слишком много попыток, попробуй позже',
+    USER_DISABLED: 'Аккаунт отключён', OFFLINE: 'Нет интернета'
+  };
+  function human(e) {
+    var code = String((e && e.code) || (e && e.message) || '');
+    if (code.indexOf('WEAK_PASSWORD') === 0) code = 'WEAK_PASSWORD';
+    if (e instanceof TypeError || /Failed to fetch|NetworkError/.test(code)) code = 'OFFLINE';
+    return MSG[code] || ('Ошибка: ' + code);
+  }
+
+  function login(nick, pass, create) {
+    nick = cleanNick(nick);
+    if (nick.length < 3 || nick.length > 16) return Promise.reject(fail('NICK_LEN'));
+    if (!/^[0-9A-Za-zА-Яа-яЁё _.\-]+$/.test(nick)) return Promise.reject(fail('NICK_CHARS'));
+    if (String(pass).length < 6) return Promise.reject(fail('WEAK_PASSWORD'));
+    return emailOf(nick).then(function (email) {
+      return post(AUTH + '/accounts:' + (create ? 'signUp' : 'signInWithPassword') + '?key=' + C.apiKey,
+                  { email: email, password: String(pass), returnSecureToken: true });
+    }).then(function (j) {
+      sess = { uid: j.localId, nick: nick, refresh: j.refreshToken };
+      idToken = j.idToken;
+      idUntil = Date.now() + (parseInt(j.expiresIn, 10) - 60) * 1000;
+      lsSet(KEY_SESS, JSON.stringify(sess));
+      st.in = true; st.nick = nick;
+      return sync();
+    });
+  }
+  function logout() {
+    sess = null; idToken = null; cloudScores = {};
+    lsDel(KEY_SESS);
+    st.in = false; st.nick = null; st.msg = '';
+    st.rev++;
+  }
+
+  // ---- окно входа поверх игры (обычные поля ввода — на телефоне сама
+  // всплывает клавиатура) ----
+  var CSS = '#ot-acc{position:fixed;left:0;top:0;right:0;bottom:0;z-index:2147483646;display:flex;' +
+    'align-items:center;justify-content:center;background:rgba(10,5,18,.74);font-family:monospace}' +
+    '#ot-acc .box{background:#1e1430;border:3px solid #fcd63c;box-shadow:0 0 0 3px #000;color:#fafafc;' +
+    'padding:12px 16px 14px;width:min(92vw,360px);max-height:94vh;overflow:auto;text-align:center;box-sizing:border-box}' +
+    '#ot-acc h2{margin:0 0 4px;color:#fcd63c;font-size:20px;letter-spacing:1px}' +
+    '#ot-acc p{margin:4px 0 6px;font-size:13px;line-height:1.35;color:#ddd}' +
+    '#ot-acc input{width:100%;box-sizing:border-box;margin:4px 0;padding:8px;font-size:16px;' +
+    'background:#0f0a1a;color:#fff;border:2px solid #4e3e6c;border-radius:0;font-family:monospace}' +
+    '#ot-acc .row{display:flex;gap:8px;margin-top:8px}' +
+    '#ot-acc button{flex:1;padding:10px 4px;font-size:14px;font-weight:bold;background:#1e1430;' +
+    'color:#fafafc;border:2px solid #fafafc;font-family:monospace}' +
+    '#ot-acc button.main{color:#fcd63c;border-color:#fcd63c}' +
+    '#ot-acc button:disabled{opacity:.5}' +
+    '#ot-acc .msg{min-height:16px;margin-top:6px;color:#ff8a9a;font-size:13px}' +
+    '#ot-acc .ok{color:#7ee08a}' +
+    // клавиатура открыта (поле в фокусе): окно у верхнего края, без пояснений —
+    // иначе в альбомной ориентации клавиатура закрывает поля
+    '#ot-acc.kb{align-items:flex-start;padding-top:3px}' +
+    '#ot-acc.kb .box{padding:6px 12px 8px}#ot-acc.kb h2{font-size:14px;margin:0 0 2px}' +
+    '#ot-acc.kb p{display:none}#ot-acc.kb input{padding:5px 8px;margin:2px 0}' +
+    '#ot-acc.kb .row{margin-top:4px}#ot-acc.kb button{padding:6px 4px}';
+  function el(tag, attrs, text) {
+    var e = document.createElement(tag);
+    for (var a in attrs || {}) e.setAttribute(a, attrs[a]);
+    if (text) e.textContent = text;
+    return e;
+  }
+  function render() {
+    if (!root) return;
+    var box = root.querySelector('.box');
+    box.innerHTML = '';
+    box.appendChild(el('h2', {}, 'АККАУНТ'));
+    var msg = el('div', { 'class': 'msg' + (st.msgOk ? ' ok' : '') }, st.msg || '');
+    if (st.in) {
+      box.appendChild(el('p', {}, 'Ты вошёл как ' + st.nick + '.'));
+      box.appendChild(el('p', {}, 'Рекорды и стиль персонажа хранятся в аккаунте — они общие на сайте и в приложении.'));
+      var row = el('div', { 'class': 'row' });
+      var out = el('button', {}, 'ВЫЙТИ'), close = el('button', { 'class': 'main' }, 'ГОТОВО');
+      out.onclick = function () { logout(); st.msg = 'Ты вышел из аккаунта'; st.msgOk = true; render(); };
+      close.onclick = hide;
+      row.appendChild(out); row.appendChild(close);
+      box.appendChild(row); box.appendChild(msg);
+      return;
+    }
+    box.appendChild(el('p', {}, 'Войди, чтобы рекорды и стиль хранились в аккаунте и были общими на сайте и в приложении.'));
+    var nick = el('input', { type: 'text', placeholder: 'Ник', maxlength: '16', autocomplete: 'username',
+                             autocapitalize: 'none', spellcheck: 'false' });
+    var pass = el('input', { type: 'password', placeholder: 'Пароль (от 6 символов)', autocomplete: 'current-password' });
+    nick.value = st.lastNick || '';
+    box.appendChild(nick); box.appendChild(pass);
+    var row1 = el('div', { 'class': 'row' });
+    var bIn = el('button', { 'class': 'main' }, 'ВОЙТИ'), bNew = el('button', {}, 'СОЗДАТЬ');
+    row1.appendChild(bIn); row1.appendChild(bNew);
+    var row2 = el('div', { 'class': 'row' });
+    var bClose = el('button', {}, 'ЗАКРЫТЬ');
+    row2.appendChild(bClose);
+    box.appendChild(row1); box.appendChild(row2); box.appendChild(msg);
+    function go(create) {
+      if (st.busy) return;
+      st.busy = true; st.lastNick = nick.value;
+      bIn.disabled = bNew.disabled = true;
+      msg.className = 'msg ok'; msg.textContent = create ? 'Создаю аккаунт…' : 'Вхожу…';
+      login(nick.value, pass.value, create).then(function () {
+        st.busy = false; st.msg = create ? 'Аккаунт создан!' : 'Готово!'; st.msgOk = true; render();
+      }, function (e) {
+        st.busy = false; bIn.disabled = bNew.disabled = false;
+        if (!st.in) { msg.className = 'msg'; msg.textContent = human(e); }
+        else { st.msg = 'Вошёл, но не удалось обновить данные: ' + human(e); st.msgOk = false; render(); }
+      });
+    }
+    bIn.onclick = function () { go(false); };
+    bNew.onclick = function () { go(true); };
+    bClose.onclick = hide;
+    pass.onkeydown = function (e) { if (e.key === 'Enter') go(false); };
+  }
+  function show() {
+    if (!root) {
+      var s = el('style'); s.textContent = CSS; document.head.appendChild(s);
+      root = el('div', { id: 'ot-acc' });
+      root.appendChild(el('div', { 'class': 'box' }));
+      // клавиши и касания в окне не должны доходить до игры под ним
+      ['keydown', 'keyup', 'keypress', 'pointerdown', 'pointerup', 'mousedown', 'mouseup',
+       'touchstart', 'touchend', 'click'].forEach(function (t) {
+        root.addEventListener(t, function (e) { e.stopPropagation(); }, false);
+      });
+      root.addEventListener('click', function (e) { if (e.target === root) hide(); });
+      root.addEventListener('focusin', function (e) {
+        if (e.target.tagName === 'INPUT') { root.classList.add('kb'); }
+      });
+      root.addEventListener('focusout', function () {
+        setTimeout(function () {
+          if (!root.contains(document.activeElement) || document.activeElement.tagName !== 'INPUT') root.classList.remove('kb');
+        }, 150);
+      });
+      document.body.appendChild(root);
+    }
+    st.msg = ''; st.msgOk = false;
+    render();
+    root.style.display = 'flex';
+    st.open = true;
+  }
+  function hide() {
+    if (root) root.style.display = 'none';
+    try { document.activeElement && document.activeElement.blur(); } catch (e) {}
+    st.open = false;
+    try { window.focus(); var cv = document.querySelector('canvas'); if (cv) cv.focus(); } catch (e) {}
+  }
+
+  window.otAccount = {
+    available: true,
+    state: function () {
+      return JSON.stringify({ available: true, in: st.in, nick: st.nick, busy: st.busy,
+                              rev: st.rev, open: st.open });
+    },
+    isOpen: function () { return st.open; },
+    open: show,
+    close: hide,
+    // новый рекорд: в облако уходят только те, что выше уже сохранённых там
+    pushScores: function (json) {
+      if (!sess) return;
+      var s = {}, up = {}, k;
+      try { s = JSON.parse(json) || {}; } catch (e) { return; }
+      for (k in s) if ((parseInt(s[k], 10) || 0) > (cloudScores[k] || 0)) up[k] = parseInt(s[k], 10);
+      if (!Object.keys(up).length) return;
+      db('PATCH', '/scores', up).then(function () {
+        for (var u in up) cloudScores[u] = up[u];
+      }, function () { sync().catch(function () {}); });   // в облаке уже больше — сверимся
+    },
+    pushLooks: function (json) {
+      if (!sess) return;
+      var l = {};
+      try { l = JSON.parse(json) || {}; } catch (e) { return; }
+      db('PUT', '/looks', l).catch(function () {});
+    },
+    // для проверок
+    _debug: function () { return JSON.stringify({ sess: !!sess, cloudScores: cloudScores }); }
+  };
+
+  // уже входил на этом устройстве — тихо подтягиваем облако при запуске
+  sess = readJSON(KEY_SESS);
+  if (sess && sess.uid && sess.refresh) {
+    st.in = true; st.nick = sess.nick;
+    sync().catch(function (e) { console.log('OT_ACC sync ' + e); });
+  } else {
+    sess = null;
+  }
+})();</script><script src="splash/splash.js?v=1790914117"></script><script src="https://pygame-web.github.io/cdn/0.9.3/pythons.js" type=module id="site" data-python="python3.12" data-LINES=42 data-COLUMNS=132 data-os="vtx,snd,gui" async defer>#<!--
 
 print("""
 Loading olivertreemobile from olivertreemobile.apk
