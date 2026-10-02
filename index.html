@@ -425,7 +425,7 @@
   // таблица лидеров: лучший рекорд игрока (среди всех персонажей) + ник; читать может любой
   var boardBest = -1, board = { state: 'idle', rows: [] }, cloudWallet = {};
   var friends = { state: 'idle', rows: [] }, requests = { state: 'idle', rows: [] }, myStatus = '', resetCount = 0, myId = '', claiming = false;
-  var settingsRev = 0, settingsTimer = null;
+  var settingsRev = 0, settingsTimer = null, muteState = {};
   function pushBoard(scores) {
     if (!sess) return;
     var best = 0, k;
@@ -684,6 +684,19 @@
     return dbRoot('DELETE', '/leaderboard/' + uid).then(function () {
       return dbRoot('DELETE', '/users/' + uid + '/scores').catch(function () {});
     }).then(function () { fetchTop(); });
+  }
+  // ---- модерация чата: /moderation/{uid}/muted — читать может сам игрок (чтобы увидеть
+  // свою блокировку) и админ, писать — только админ. Правило нужно завести в самой базе:
+  // здесь только кнопка, настоящий запрет шлёт сервер (см. README/комментарий в isAdmin) ----
+  function fetchMute(uid) {
+    return dbRoot('GET', '/moderation/' + uid + '/muted').then(function (v) {
+      muteState[uid] = !!v; st.rev++; if (root) render();
+    }, function () { muteState[uid] = false; });
+  }
+  function adminMute(uid, muted) {
+    return dbRoot('PUT', '/moderation/' + uid + '/muted', !!muted).then(function () {
+      muteState[uid] = !!muted;
+    });
   }
   // обнулить всех: рекорды и кассеты в облаке, таблица, и новый номер сброса —
   // устройства игроков сами очистятся при следующем запуске (checkReset)
@@ -978,12 +991,18 @@
       friends.rows.forEach(function (r) { if (r.uid === st.arg) cf = r; });
       var other = st.arg;
       box.querySelector('h2').textContent = 'ЧАТ: ' + (cf ? cf.nick.toUpperCase() : 'ДРУГ');
+      if (!(sess.uid in muteState)) { muteState[sess.uid] = null; fetchMute(sess.uid); }
+      var iAmMuted = !!muteState[sess.uid];
       var list = el('div', { style: 'height:150px;overflow:auto;text-align:left;background:#0f0a1a;border:2px solid #4e3e6c;padding:6px;margin:4px 0;font-size:13px;line-height:1.35' });
       var ci = el('input', { type: 'text', placeholder: 'Сообщение…', maxlength: '200', autocomplete: 'off', spellcheck: 'false' });
       var rc = el('div', { 'class': 'row' });
       var bsend = el('button', { 'class': 'main' }, 'ОТПРАВИТЬ'), bback = el('button', {}, 'ЗАКРЫТЬ');
       rc.appendChild(bsend); rc.appendChild(bback);
       box.appendChild(list); box.appendChild(ci); box.appendChild(rc); box.appendChild(msg);
+      if (iAmMuted) {
+        ci.disabled = true; bsend.disabled = true;
+        box.insertBefore(el('p', { style: 'color:#ff8a9a' }, 'Тебя заблокировали в чате.'), list);
+      }
       var shown = null;
       function paint(rows) {
         var key = rows.map(function (m) { return m.id; }).join(',');
@@ -1006,7 +1025,7 @@
         });
       }
       function send() {
-        if (st.busy || !ci.value.trim()) return;
+        if (st.busy || iAmMuted || !ci.value.trim()) return;
         st.busy = true; var v = ci.value;
         sendChat(other, v).then(function () { st.busy = false; ci.value = ''; pull(); }, function (e) {
           st.busy = false; msg.className = 'msg'; msg.textContent = human(e);
@@ -1015,6 +1034,7 @@
       bsend.onclick = send;
       ci.onkeydown = function (e) { if (e.key === 'Enter') send(); };
       bback.onclick = function () { chatStop(); st.mode = 'friend'; render(); };
+      chatStop();                    // на случай повторного render() в этом же режиме чата
       pull();
       chatTimer = setInterval(pull, 3000);
       return;
@@ -1030,6 +1050,11 @@
       var r1 = el('div', { 'class': 'row' });
       var bset = el('button', { 'class': 'main' }, 'СОХРАНИТЬ'), bdel = el('button', {}, 'УДАЛИТЬ СТРОКУ');
       r1.appendChild(bset); r1.appendChild(bdel); box.appendChild(r1);
+      if (ar && !(ar.uid in muteState)) { muteState[ar.uid] = null; fetchMute(ar.uid); }
+      var muted = !!(ar && muteState[ar.uid]);
+      var r1b = el('div', { 'class': 'row' });
+      var bmute = el('button', {}, muted ? 'РАЗБЛОКИРОВАТЬ ЧАТ' : 'ЗАБЛОКИРОВАТЬ ЧАТ');
+      r1b.appendChild(bmute); box.appendChild(r1b);
       var r2a = el('div', { 'class': 'row' }), bcl = el('button', {}, 'ЗАКРЫТЬ');
       r2a.appendChild(bcl); box.appendChild(r2a); box.appendChild(msg);
       var armed = false;
@@ -1043,6 +1068,12 @@
         if (!armed) { armed = true; bdel.textContent = 'ТОЧНО? ЕЩЁ ТАП'; return; }
         st.busy = true;
         adminDelete(ar.uid).then(function () { st.busy = false; hide(); }, failShow);
+      };
+      bmute.onclick = function () {
+        if (!ar || st.busy) return; st.busy = true;
+        adminMute(ar.uid, !muted).then(function () {
+          st.busy = false; st.msg = muted ? 'Разблокирован' : 'Заблокирован в чате'; st.msgOk = true; render();
+        }, failShow);
       };
       bcl.onclick = hide;
       return;
