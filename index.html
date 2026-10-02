@@ -1,4 +1,4 @@
-<html lang="en-us"><style>html,body{background:#000!important;margin:0}</style><script src="music_data.js?v=1790923285"></script><script>(function () {
+<html lang="en-us"><style>html,body{background:#000!important;margin:0}</style><script src="music_data.js?v=1790924288"></script><script>(function () {
   // pygbag при старте без касания пытается проиграть «пустой» звук и, получив
   // отказ браузера, показывает alert. Звук мы разблокируем сами по первому
   // касанию, поэтому это сообщение гасим (остальные alert не трогаем).
@@ -444,7 +444,7 @@
         var rows = [];
         for (var u in (j || {})) {
           var e = j[u];
-          if (e && typeof e.best === 'number' && e.best > 0 && e.nick) rows.push({ nick: String(e.nick), best: e.best, status: String(e.status || '') });
+          if (e && typeof e.best === 'number' && e.best > 0 && e.nick) rows.push({ uid: u, nick: String(e.nick), best: e.best, status: String(e.status || '') });
         }
         rows.sort(function (a, b) { return b.best - a.best; });
         board = { state: 'ok', rows: rows };
@@ -516,6 +516,7 @@
     USER_DISABLED: 'Аккаунт отключён', OFFLINE: 'Нет интернета',
     NEED_PW: 'Чтобы сменить ник, введи пароль', BAD_PW: 'Неверный пароль',
     FR_HAVE: 'Вы уже друзья', FR_SHORT: 'ID друга — шесть цифр', FR_SELF: 'Это твой собственный ID', FR_NONE: 'Игрок с таким ID не найден',
+    BAD_NUM: 'Рекорд — число от 0 до 99999999', EMPTY: 'Напиши сообщение', DB_401: 'Нет доступа (для чата нужна дружба)',
     GOOGLE_BAD: 'Не удалось войти через Google', GOOGLE_POPUP: 'Разреши всплывающее окно и нажми ещё раз'
   };
   function human(e) {
@@ -669,6 +670,72 @@
     for (k in cloudScores) b = Math.max(b, parseInt(cloudScores[k], 10) || 0);
     return b;
   }
+  // ---- админ: uid игрока Kadronina зашит и в правилах базы (там настоящая защита);
+  // здесь он только открывает кнопки. Админ правит рекорды, удаляет строки, обнуляет всё. ----
+  function isAdmin() { return !!(sess && sess.uid === String(C.adminUid || '')); }
+  function adminSet(uid, nick, status, best) {
+    best = parseInt(best, 10);
+    if (!(best >= 0) || best >= 100000000) return Promise.reject(fail('BAD_NUM'));
+    var row = { nick: nick, best: best };
+    if (status) row.status = status;
+    return dbRoot('PUT', '/leaderboard/' + uid, row).then(function () { fetchTop(); });
+  }
+  function adminDelete(uid) {
+    return dbRoot('DELETE', '/leaderboard/' + uid).then(function () {
+      return dbRoot('DELETE', '/users/' + uid + '/scores').catch(function () {});
+    }).then(function () { fetchTop(); });
+  }
+  // обнулить всех: рекорды и кассеты в облаке, таблица, и новый номер сброса —
+  // устройства игроков сами очистятся при следующем запуске (checkReset)
+  function adminReset() {
+    var epoch;
+    return token().then(function (t) {
+      return fetch(DB + '/users.json?shallow=true&auth=' + encodeURIComponent(t));
+    }).then(function (r) {
+      if (!r.ok) throw fail('DB_' + r.status);
+      return r.json();
+    }).then(function (u) {
+      var upd = {};
+      Object.keys(u || {}).forEach(function (k) { upd[k + '/scores'] = null; upd[k + '/wallet'] = null; });
+      return Object.keys(upd).length ? dbRoot('PATCH', '/users', upd) : null;
+    }).then(function () {
+      return dbRoot('DELETE', '/leaderboard');
+    }).then(function () {
+      return dbRoot('GET', '/config/resetEpoch');
+    }).then(function (e) {
+      epoch = (parseInt(e, 10) || 0) + 1;
+      return dbRoot('PUT', '/config/resetEpoch', epoch);
+    }).then(function () {
+      // это устройство админа очищаем сами, без выхода из аккаунта
+      lsSet('oliver_epoch', String(epoch));
+      lsDel(KEY_SCORES); lsDel('oliver_wallet'); cookieSet(KEY_SCORES, '{}');
+      cloudScores = {}; cloudWallet = {}; boardBest = -1;
+      resetCount++; st.rev++; fetchTop();
+    });
+  }
+  // ---- чат с другом: chats/{пара}/{id сообщения} = {from, text, t}; пара = два uid по алфавиту ----
+  function pairId(a, b) { return a < b ? a + '_' + b : b + '_' + a; }
+  function fetchChat(uid) {
+    return token().then(function (t) {
+      return fetch(DB + '/chats/' + pairId(sess.uid, uid) + '.json?orderBy=%22%24key%22&limitToLast=60&auth=' + encodeURIComponent(t));
+    }).then(function (r) {
+      if (!r.ok) throw fail('DB_' + r.status);
+      return r.json();
+    }).then(function (j) {
+      var out = [];
+      for (var k in (j || {})) out.push({ id: k, from: j[k].from, text: String(j[k].text || ''), t: j[k].t || 0 });
+      out.sort(function (a, b) { return a.t - b.t || (a.id < b.id ? -1 : 1); });
+      return out;
+    });
+  }
+  function sendChat(uid, text) {
+    text = String(text || '').replace(/\s+/g, ' ').trim();
+    if (!text) return Promise.reject(fail('EMPTY'));
+    if (text.length > 200) text = text.slice(0, 200);
+    return dbRoot('POST', '/chats/' + pairId(sess.uid, uid), { from: sess.uid, text: text, t: Date.now() });
+  }
+  var chatTimer = null;
+  function chatStop() { if (chatTimer) { clearInterval(chatTimer); chatTimer = null; } }
   function friendRow(u) {
     return fetch(DB + '/leaderboard/' + u + '.json').then(function (r) { return r.json(); }).then(function (e) {
       return e ? { uid: u, nick: String(e.nick || '?'), best: parseInt(e.best, 10) || 0, status: String(e.status || '') }
@@ -901,6 +968,98 @@
       bz.onclick = hide;
       return;
     }
+    chatStop();
+    if (mode === 'chat') {
+      var cf = null;
+      friends.rows.forEach(function (r) { if (r.uid === st.arg) cf = r; });
+      var other = st.arg;
+      box.querySelector('h2').textContent = 'ЧАТ: ' + (cf ? cf.nick.toUpperCase() : 'ДРУГ');
+      var list = el('div', { style: 'height:150px;overflow:auto;text-align:left;background:#0f0a1a;border:2px solid #4e3e6c;padding:6px;margin:4px 0;font-size:13px;line-height:1.35' });
+      var ci = el('input', { type: 'text', placeholder: 'Сообщение…', maxlength: '200', autocomplete: 'off', spellcheck: 'false' });
+      var rc = el('div', { 'class': 'row' });
+      var bsend = el('button', { 'class': 'main' }, 'ОТПРАВИТЬ'), bback = el('button', {}, 'ЗАКРЫТЬ');
+      rc.appendChild(bsend); rc.appendChild(bback);
+      box.appendChild(list); box.appendChild(ci); box.appendChild(rc); box.appendChild(msg);
+      var shown = null;
+      function paint(rows) {
+        var key = rows.map(function (m) { return m.id; }).join(',');
+        if (key === shown) return;
+        shown = key; list.innerHTML = '';
+        if (!rows.length) list.appendChild(el('div', { style: 'color:#9a8fb8;text-align:center;margin-top:50px' }, 'Пока пусто — напиши первым!'));
+        rows.forEach(function (m) {
+          var mine = m.from === sess.uid;
+          var line = el('div', { style: 'margin:2px 0;word-break:break-word' });
+          line.appendChild(el('span', { style: 'color:' + (mine ? '#fcd63c' : '#7ee08a') + ';font-weight:bold' }, (mine ? 'Я' : (cf ? cf.nick : '?')) + ': '));
+          line.appendChild(el('span', {}, m.text));
+          list.appendChild(line);
+        });
+        list.scrollTop = list.scrollHeight;
+      }
+      function pull() {
+        if (st.mode !== 'chat' || !st.open) { chatStop(); return; }
+        fetchChat(other).then(function (rows) { msg.textContent = ''; paint(rows); }, function (e) {
+          if (!deadAccount(e)) { msg.className = 'msg'; msg.textContent = human(e); }
+        });
+      }
+      function send() {
+        if (st.busy || !ci.value.trim()) return;
+        st.busy = true; var v = ci.value;
+        sendChat(other, v).then(function () { st.busy = false; ci.value = ''; pull(); }, function (e) {
+          st.busy = false; msg.className = 'msg'; msg.textContent = human(e);
+        });
+      }
+      bsend.onclick = send;
+      ci.onkeydown = function (e) { if (e.key === 'Enter') send(); };
+      bback.onclick = function () { chatStop(); st.mode = 'friend'; render(); };
+      pull();
+      chatTimer = setInterval(pull, 3000);
+      return;
+    }
+    if (mode === 'adminrow') {
+      var ar = null;
+      board.rows.forEach(function (r) { if (r.uid === st.arg) ar = r; });
+      box.querySelector('h2').textContent = ar ? ar.nick.toUpperCase() : 'ИГРОК';
+      box.appendChild(el('p', {}, 'Админ: рекорд в таблице сейчас ' + (ar ? ar.best : '?')));
+      var ab = el('input', { type: 'text', inputmode: 'numeric', pattern: '[0-9]*', placeholder: 'Новый рекорд', maxlength: '8', autocomplete: 'off' });
+      if (ar) ab.value = String(ar.best);
+      box.appendChild(ab);
+      var r1 = el('div', { 'class': 'row' });
+      var bset = el('button', { 'class': 'main' }, 'СОХРАНИТЬ'), bdel = el('button', {}, 'УДАЛИТЬ СТРОКУ');
+      r1.appendChild(bset); r1.appendChild(bdel); box.appendChild(r1);
+      var r2a = el('div', { 'class': 'row' }), bcl = el('button', {}, 'ЗАКРЫТЬ');
+      r2a.appendChild(bcl); box.appendChild(r2a); box.appendChild(msg);
+      var armed = false;
+      bset.onclick = function () {
+        if (!ar || st.busy) return; st.busy = true;
+        adminSet(ar.uid, ar.nick, ar.status, ab.value).then(function () {
+          st.busy = false; st.msg = 'Рекорд сохранён'; st.msgOk = true; hide(); }, failShow);
+      };
+      bdel.onclick = function () {
+        if (!ar || st.busy) return;
+        if (!armed) { armed = true; bdel.textContent = 'ТОЧНО? ЕЩЁ ТАП'; return; }
+        st.busy = true;
+        adminDelete(ar.uid).then(function () { st.busy = false; hide(); }, failShow);
+      };
+      bcl.onclick = hide;
+      return;
+    }
+    if (mode === 'adminpanel') {
+      box.querySelector('h2').textContent = 'АДМИН';
+      box.appendChild(el('p', {}, 'Тап по игроку в таблице — поменять его рекорд или удалить строку.'));
+      box.appendChild(el('p', {}, 'Кнопка ниже обнуляет рекорды и кассеты ВСЕХ игроков и очищает таблицу. Аккаунты и друзья остаются.'));
+      var r3a = el('div', { 'class': 'row' });
+      var bz1 = el('button', { 'class': 'main' }, 'ОБНУЛИТЬ ВСЁ'), bz2 = el('button', {}, 'ЗАКРЫТЬ');
+      r3a.appendChild(bz1); r3a.appendChild(bz2); box.appendChild(r3a); box.appendChild(msg);
+      var arm2 = false;
+      bz1.onclick = function () {
+        if (st.busy) return;
+        if (!arm2) { arm2 = true; bz1.textContent = 'ТОЧНО? ЕЩЁ ТАП'; return; }
+        st.busy = true; msg.className = 'msg ok'; msg.textContent = 'Обнуляю…';
+        adminReset().then(function () { st.busy = false; st.msg = 'Всё обнулено'; st.msgOk = true; hide(); }, failShow);
+      };
+      bz2.onclick = hide;
+      return;
+    }
     if (mode === 'friend') {
       var fr = null;
       friends.rows.forEach(function (r) { if (r.uid === st.arg) fr = r; });
@@ -910,8 +1069,11 @@
         if (fr.status) box.appendChild(el('p', {}, '«' + fr.status + '»'));
       }
       var rr = el('div', { 'class': 'row' });
-      var bd = el('button', {}, 'УДАЛИТЬ ИЗ ДРУЗЕЙ'), bk = el('button', { 'class': 'main' }, 'ЗАКРЫТЬ');
+      var bd = el('button', {}, 'УДАЛИТЬ ИЗ ДРУЗЕЙ'), bk = el('button', {}, 'ЗАКРЫТЬ');
+      var bw = el('button', { 'class': 'main' }, 'НАПИСАТЬ');
+      var rw = el('div', { 'class': 'row' }); rw.appendChild(bw); box.appendChild(rw);
       rr.appendChild(bd); rr.appendChild(bk); box.appendChild(rr); box.appendChild(msg);
+      bw.onclick = function () { st.mode = 'chat'; render(); };
       bd.onclick = function () {
         removeFriend(st.arg).then(hide, function () { msg.className = 'msg'; msg.textContent = 'Нет интернета'; });
       };
@@ -1028,6 +1190,7 @@
     try { frame.contentWindow.focus(); } catch (e) {}      // клавиатура теперь идёт в окно, а не в игру
   }
   function hide() {
+    chatStop();
     st.mode = null;
     if (frame) frame.style.display = 'none';
     [].forEach.call(document.querySelectorAll('canvas'), function (cv) {
@@ -1045,7 +1208,7 @@
     state: function () {
       return JSON.stringify({ available: true, in: st.in, nick: st.nick, busy: st.busy,
                               rev: st.rev, open: st.open, reset: resetCount, cfg: settingsRev,
-                              req: requests.rows.length });
+                              req: requests.rows.length, admin: isAdmin() });
     },
     isOpen: function () { return st.open; },
     board: function () { return JSON.stringify({ state: board.state, rows: board.rows, me: st.nick }); },
@@ -1110,7 +1273,7 @@
   } else {
     sess = null;
   }
-})();</script><script src="splash/splash.js?v=1790923285"></script><script src="https://pygame-web.github.io/cdn/0.9.3/pythons.js" type=module id="site" data-python="python3.12" data-LINES=42 data-COLUMNS=132 data-os="vtx,snd,gui" async defer>#<!--
+})();</script><script src="splash/splash.js?v=1790924288"></script><script src="https://pygame-web.github.io/cdn/0.9.3/pythons.js" type=module id="site" data-python="python3.12" data-LINES=42 data-COLUMNS=132 data-os="vtx,snd,gui" async defer>#<!--
 
 print("""
 Loading olivertreemobile from olivertreemobile.apk
