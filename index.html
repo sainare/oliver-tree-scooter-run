@@ -1,4 +1,4 @@
-<html lang="en-us"><style>html,body{background:#000!important;margin:0}</style><script src="music_data.js?v=1790966280"></script><script>(function () {
+<html lang="en-us"><style>html,body{background:#000!important;margin:0}</style><script src="music_data.js?v=1791214356"></script><script>(function () {
   // pygbag при старте без касания пытается проиграть «пустой» звук и, получив
   // отказ браузера, показывает alert. Звук мы разблокируем сами по первому
   // касанию, поэтому это сообщение гасим (остальные alert не трогаем).
@@ -219,9 +219,29 @@
       } else runMain(job);
     });
   }
+  // общие песни, которые загрузил админ: в базе songs/{N} лежит {data: base64}; играем как обычный трек
+  function customLoad(name) {
+    var C = window.OT_FIREBASE;
+    if (!C || !C.databaseURL) return Promise.resolve(null);
+    var url = String(C.databaseURL).replace(/\/+$/, '') + '/songs/' + name.slice(2) + '.json';
+    return fetch(url).then(function (r) { return r.ok ? r.json() : null; }).then(function (d) {
+      if (!d || !d.data) return null;
+      var bin = atob(d.data), n = bin.length, u = new Uint8Array(n), i;
+      for (i = 0; i < n; i++) u[i] = bin.charCodeAt(i);
+      return new Promise(function (ok, bad) { ctx.decodeAudioData(u.buffer, ok, bad); });
+    });
+  }
   function load(name) {
     if (buffers[name]) return Promise.resolve(buffers[name]);
     if (loading[name]) return loading[name];
+    if (name.indexOf('c:') === 0) {
+      loading[name] = customLoad(name).then(function (buf) {
+        delete loading[name];
+        if (buf) { buffers[name] = buf; order.push(name); trim(); }
+        return buf;
+      }).catch(function (e) { delete loading[name]; console.log('OT_MUSIC_ERR ' + name + ' ' + e); return null; });
+      return loading[name];
+    }
     var spec = window.OT_SONGS && window.OT_SONGS[name];
     if (!spec) { console.log('OT_MUSIC_ERR нет трека ' + name); return Promise.resolve(null); }
     loading[name] = renderAsync(spec).then(function (pcm) {
@@ -310,9 +330,13 @@
       }
       try {                         // песня по умолчанию от админа — если игрок свою не выбирал
         var rp = JSON.parse(localStorage.getItem('oliver_remote_picks') || 'null');
-        if (rp && typeof rp.load === 'number' && !cfg.own_load && v === (window.OT_LOAD_DEFAULT || 0)) v = rp.load;
+        if (rp && !cfg.own_load && v === (window.OT_LOAD_DEFAULT || 0)) {
+          if (typeof rp.load === 'number') v = rp.load;
+          else if (typeof rp.load === 'string' && /^c:[0-9]+$/.test(rp.load)) name = rp.load;
+        }
       } catch (e) {}
-      if (v > 0 && v <= keys.length) name = keys[v - 1];
+      if (name) { /* общая песня */ }
+      else if (v > 0 && v <= keys.length) name = keys[v - 1];
       else {
         var last = null;
         try { last = localStorage.getItem('oliver_last_load'); } catch (e) {}
@@ -429,7 +453,12 @@
   // таблица лидеров: лучший рекорд игрока (среди всех персонажей) + ник; читать может любой
   var boardBest = -1, board = { state: 'idle', rows: [] }, cloudWallet = {};
   var friends = { state: 'idle', rows: [] }, requests = { state: 'idle', rows: [] }, myStatus = '', resetCount = 0, myId = '', claiming = false;
-  var settingsRev = 0, settingsTimer = null;
+  var settingsRev = 0, settingsTimer = null, muteState = {};
+  // ---- анти-чит на отправке рекорда: явно нереальное число (вручную исправленный
+  // localStorage) или нереальный скачок с прошлой отправки — не уходят в облако.
+  // CHEAT_RATE щедро выше теоретического максимума очков в секунду в самой игре ----
+  var CHEAT_CAP = 100000000, CHEAT_RATE = 1000, CHEAT_GRACE = 10000;
+  var lastPush = {}, cheatCount = 0;
   function pushBoard(scores) {
     if (!sess) return;
     var best = 0, k;
@@ -519,7 +548,7 @@
       pushBoard(merged);
       fetchRequests();
       return Promise.all(jobs).then(function () { return applyGrants(); });
-    }).then(function () { st.rev++; showInbox(); });
+    }).then(function () { st.rev++; showInbox(); startUnreadWatch(); fetchBroadcast(); });
   }
 
   var MSG = {
@@ -532,7 +561,7 @@
     NEED_PW: 'Чтобы сменить ник, введи пароль', BAD_PW: 'Неверный пароль',
     FR_HAVE: 'Вы уже друзья', FR_SHORT: 'ID друга — шесть цифр', FR_SELF: 'Это твой собственный ID', FR_NONE: 'Игрок с таким ID не найден',
     BAD_NUM: 'Рекорд — число от 0 до 99999999', EMPTY: 'Напиши сообщение', DB_401: 'Нет доступа (для чата нужна дружба)',
-    FR_SHORT2: '', GOOGLE_BAD: 'Не удалось войти через Google', GOOGLE_POPUP: 'Разреши всплывающее окно и нажми ещё раз'
+    FR_SHORT2: '', NOFILE: 'Выбери аудиофайл', BIGFILE: 'Файл больше 800 КБ — сожми песню (mp3/ogg, ~1 минута)', GOOGLE_BAD: 'Не удалось войти через Google', GOOGLE_POPUP: 'Разреши всплывающее окно и нажми ещё раз'
   };
   function human(e) {
     var code = String((e && e.code) || (e && e.message) || '');
@@ -688,9 +717,143 @@
   // grants/{uid}/{id} пишет только админ (правила), claimed/{uid}/{id} — отметка «получено»,
   // пишется один раз и только если выдача существует. Кассеты и предметы зачисляются в кошелёк
   // одним атомарным запросом вместе с отметкой — повторно получить выдачу нельзя.
-  var inboxItems = [], defaultsRev = 0;
+  var inboxItems = [], defaultsRev = 0, unread = {}, notified = {}, unreadTimer = null;
+  // ---- общее сообщение от админа всем: config/broadcast {id, text, t}; показывается один раз ----
+  function fetchBroadcast() {
+    fetch(DB + '/config/broadcast.json').then(function (r) { return r.ok ? r.json() : null; }).then(function (d) {
+      if (!d || !d.id || !d.text) return;
+      if (String(d.id) === lsGet('oliver_bc')) return;
+      if (inboxItems.some(function (m) { return m.bc === d.id; })) return;
+      inboxItems.push({ text: 'Сообщение для всех: ' + String(d.text), bc: String(d.id) });
+      whenReady(showInbox);
+    }).catch(function () {});
+  }
+  function whenReady(fn) {          // игра ещё грузится — окно не должно вылезти поверх заставки
+    var tries = 0;
+    (function tick() {
+      if (document.querySelector('canvas') && !document.getElementById('ot-splash')) { setTimeout(fn, 600); return; }
+      if (++tries < 120) setTimeout(tick, 1000);
+    })();
+  }
+  function adminBroadcast(text) {
+    text = String(text || '').trim().slice(0, 300);
+    if (!text) return Promise.reject(fail('EMPTY'));
+    return dbRoot('PUT', '/config/broadcast', { id: String(Date.now()), text: text, t: Date.now() });
+  }
+  // ---- сообщения от друзей: раз в полминуты смотрим последнее сообщение каждого чата ----
+  function seenKey(u) { return 'oliver_seen_' + pairId(sess.uid, u); }
+  function markSeen(u, id) {
+    if (!sess || !id) return;
+    lsSet(seenKey(u), id);
+    if (unread[u]) { delete unread[u]; st.rev++; }
+  }
+  function toast(text, ms) {
+    ms = ms || 4200;
+    try {
+      var d = document.createElement('div');
+      d.textContent = text;
+      d.style.cssText = 'position:fixed;left:50%;top:10px;transform:translateX(-50%);z-index:2147483645;' +
+        'background:#1e1430;color:#fcd63c;border:3px solid #fcd63c;box-shadow:0 0 0 3px #000;padding:8px 14px;' +
+        'font:bold 15px monospace;pointer-events:none;max-width:90vw;text-align:center;transition:opacity .6s';
+      document.body.appendChild(d);
+      setTimeout(function () { d.style.opacity = '0'; }, ms);
+      setTimeout(function () { if (d.parentNode) d.parentNode.removeChild(d); }, ms + 800);
+    } catch (e) {}
+  }
+  function checkUnread() {
+    if (!sess || document.hidden) return;
+    var me = sess.uid;
+    friendIds().then(function (ids) {
+      return Promise.all(ids.map(function (u) {
+        return token().then(function (t) {
+          return fetch(DB + '/chats/' + pairId(me, u) + '.json?orderBy=%22%24key%22&limitToLast=1&auth=' + encodeURIComponent(t));
+        }).then(function (r) { return r.ok ? r.json() : null; }).then(function (j) {
+          var k = j && Object.keys(j)[0];
+          if (!k || !sess || sess.uid !== me) { delete unread[u]; return; }
+          var seen = lsGet(seenKey(u));
+          var chatOpen = st.open && st.mode === 'chat' && st.arg === u;
+          if (j[k].from !== me && (!seen || k > seen) && !chatOpen) {
+            unread[u] = k;
+            if (notified[u] !== k) {
+              notified[u] = k;
+              var row = friends.rows.filter(function (r) { return r.uid === u; })[0];
+              (row ? Promise.resolve(row) : friendRow(u)).then(function (r) {
+                toast('Сообщение от ' + r.nick + ': ' + String(j[k].text || '').slice(0, 40));
+              });
+            }
+          } else delete unread[u];
+        }).catch(function () {});
+      }));
+    }).then(function () { st.rev++; }, function () {});
+  }
+  var liveTimer = null;
+  function livePoll() {
+    if (!sess || document.hidden) return;
+    applyGrants(true);
+    fetch(DB + '/config/broadcast.json').then(function (r) { return r.ok ? r.json() : null; }).then(function (d) {
+      if (!d || !d.id || !d.text || String(d.id) === lsGet('oliver_bc')) return;
+      lsSet('oliver_bc', String(d.id));
+      toast('Сообщение для всех: ' + String(d.text).slice(0, 140), 8000);
+    }).catch(function () {});
+  }
+  function startUnreadWatch() {
+    if (unreadTimer) clearInterval(unreadTimer);
+    if (liveTimer) clearInterval(liveTimer);
+    unreadTimer = setInterval(checkUnread, 30000);
+    liveTimer = setInterval(livePoll, 15000);
+    setTimeout(checkUnread, 4000);
+  }
+  // ---- админ: список всех игроков и общие песни ----
+  function adminPlayers() {
+    return token().then(function (t) {
+      return fetch(DB + '/users.json?shallow=true&auth=' + encodeURIComponent(t));
+    }).then(function (r) {
+      if (!r.ok) throw fail('DB_' + r.status);
+      return r.json();
+    }).then(function (u) {
+      var ids = Object.keys(u || {});
+      return Promise.all(ids.map(function (id) {
+        return Promise.all([dbRoot('GET', '/users/' + id + '/nick').catch(function () { return null; }),
+                            fetch(DB + '/leaderboard/' + id + '.json').then(function (r) { return r.json(); }).catch(function () { return null; })]).then(function (x) {
+          return { uid: id, nick: String(x[0] || (x[1] && x[1].nick) || '?'), best: (x[1] && parseInt(x[1].best, 10)) || 0 };
+        });
+      }));
+    }).then(function (rows) {
+      rows.sort(function (a, b) { return b.best - a.best || (a.nick < b.nick ? -1 : 1); });
+      return rows;
+    });
+  }
+  function adminSongs() {
+    return fetch(DB + '/songmeta.json').then(function (r) { return r.ok ? r.json() : null; }).then(function (m) {
+      return Object.keys(m || {}).map(function (id) { return { id: id, name: String(m[id].name || ''), size: m[id].size || 0 }; })
+        .sort(function (a, b) { return parseInt(a.id, 10) - parseInt(b.id, 10); });
+    });
+  }
+  function adminUploadSong(file, name) {
+    if (!file) return Promise.reject(fail('NOFILE'));
+    if (file.size > 800 * 1024) return Promise.reject(fail('BIGFILE'));
+    name = cleanNick(name || file.name.replace(/\.[^.]+$/, '')).slice(0, 40);
+    return new Promise(function (ok, bad) {
+      var fr = new FileReader();
+      fr.onload = function () { ok(fr.result); };
+      fr.onerror = function () { bad(fail('NOFILE')); };
+      fr.readAsDataURL(file);
+    }).then(function (url) {
+      var b64 = String(url).split(',')[1] || '';
+      return adminSongs().then(function (list) {
+        var id = list.reduce(function (m, x) { return Math.max(m, parseInt(x.id, 10) || 0); }, 0) + 1;
+        return dbRoot('PUT', '/songs/' + id, { data: b64 }).then(function () {
+          return dbRoot('PUT', '/songmeta/' + id, { name: name || ('Песня ' + id), size: file.size, t: Date.now() });
+        }).then(function () { return id; });
+      });
+    });
+  }
+  function adminDeleteSong(id) {
+    return dbRoot('DELETE', '/songmeta/' + id).then(function () { return dbRoot('DELETE', '/songs/' + id); });
+  }
   var ITEM_NAMES = { djump: 'двойной прыжок', hp: 'доп. жизнь' };
-  function applyGrants() {
+  // live = игра уже идёт: выдача зачисляется сразу и показывается уведомлением, а не окном при входе
+  function applyGrants(live) {
     return Promise.all([dbRoot('GET', '/grants/' + sess.uid), dbRoot('GET', '/claimed/' + sess.uid)]).then(function (r) {
       var g = r[0] || {}, claimed = r[1] || {};
       var ids = Object.keys(g).filter(function (k) { return !claimed[k] && g[k]; });
@@ -710,12 +873,19 @@
       ids.forEach(function (id) { upd['claimed/' + sess.uid + '/' + id] = true; });
       return dbRoot('PATCH', '/', upd).then(function () {
         lsSet('oliver_wallet', JSON.stringify(mw)); cloudWallet = mw;
-        if (said.length) inboxItems.push({ text: 'Админ выдал тебе: ' + said.join(', ') });
+        if (said.length) {
+          var note = 'Админ выдал тебе: ' + said.join(', ');
+          if (live) { toast(note, 7000); st.rev++; } else inboxItems.push({ text: note });
+        }
       });
     }).catch(function () {}).then(function () {
       return dbRoot('GET', '/inbox/' + sess.uid).then(function (m) {
         Object.keys(m || {}).sort().forEach(function (id) {
-          if (m[id] && m[id].text) inboxItems.push({ id: id, text: String(m[id].text) });
+          if (!m[id] || !m[id].text) return;
+          if (live) {                                   // сообщение от админа — тут же уведомлением, и из почты убираем
+            toast('Сообщение от админа: ' + String(m[id].text).slice(0, 140), 8000);
+            dbRoot('DELETE', '/inbox/' + sess.uid + '/' + id).catch(function () {});
+          } else inboxItems.push({ id: id, text: String(m[id].text) });
         });
       }).catch(function () {});
     });
@@ -783,32 +953,17 @@
       return dbRoot('DELETE', '/users/' + uid + '/scores').catch(function () {});
     }).then(function () { fetchTop(); });
   }
-  // обнулить всех: рекорды и кассеты в облаке, таблица, и новый номер сброса —
-  // устройства игроков сами очистятся при следующем запуске (checkReset)
-  function adminReset() {
-    var epoch;
-    return token().then(function (t) {
-      return fetch(DB + '/users.json?shallow=true&auth=' + encodeURIComponent(t));
-    }).then(function (r) {
-      if (!r.ok) throw fail('DB_' + r.status);
-      return r.json();
-    }).then(function (u) {
-      var upd = {};
-      Object.keys(u || {}).forEach(function (k) { upd[k + '/scores'] = null; upd[k + '/wallet'] = null; });
-      return Object.keys(upd).length ? dbRoot('PATCH', '/users', upd) : null;
-    }).then(function () {
-      return dbRoot('DELETE', '/leaderboard');
-    }).then(function () {
-      return dbRoot('GET', '/config/resetEpoch');
-    }).then(function (e) {
-      epoch = (parseInt(e, 10) || 0) + 1;
-      return dbRoot('PUT', '/config/resetEpoch', epoch);
-    }).then(function () {
-      // это устройство админа очищаем сами, без выхода из аккаунта
-      lsSet('oliver_epoch', String(epoch));
-      lsDel(KEY_SCORES); lsDel('oliver_wallet'); cookieSet(KEY_SCORES, '{}');
-      cloudScores = {}; cloudWallet = {}; boardBest = -1;
-      resetCount++; st.rev++; fetchTop();
+  // ---- модерация чата: /moderation/{uid}/muted — читать может сам игрок (чтобы увидеть
+  // свою блокировку) и админ, писать — только админ. Правило нужно завести в самой базе:
+  // здесь только кнопка, настоящий запрет шлёт сервер (см. README/комментарий в isAdmin) ----
+  function fetchMute(uid) {
+    return dbRoot('GET', '/moderation/' + uid + '/muted').then(function (v) {
+      muteState[uid] = !!v; st.rev++; if (root) render();
+    }, function () { muteState[uid] = false; });
+  }
+  function adminMute(uid, muted) {
+    return dbRoot('PUT', '/moderation/' + uid + '/muted', !!muted).then(function () {
+      muteState[uid] = !!muted;
     });
   }
   // ---- чат с другом: chats/{пара}/{id сообщения} = {from, text, t}; пара = два uid по алфавиту ----
@@ -961,7 +1116,9 @@
 
   function logout() {
     sess = null; idToken = null; cloudScores = {}; cloudWallet = {}; boardBest = -1; myId = ''; myStatus = '';
-    lsDel(KEY_SESS); wipeLocal(); lsDel('oliver_owner'); resetCount++; inboxItems = [];
+    lsDel(KEY_SESS); wipeLocal(); lsDel('oliver_owner'); resetCount++; inboxItems = []; unread = {}; notified = {};
+    if (unreadTimer) { clearInterval(unreadTimer); unreadTimer = null; }
+    if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
     st.in = false; st.nick = null; st.msg = '';
     st.rev++;
   }
@@ -1002,7 +1159,7 @@
     box.innerHTML = '';
     box.appendChild(el('h2', {}, 'АККАУНТ'));
     var msg = el('div', { 'class': 'msg' + (st.msgOk ? ' ok' : '') }, st.msg || '');
-    var mode = st.in ? (st.mode || 'account') : 'account';
+    var mode = (st.in || st.mode === 'inbox') ? (st.mode || 'account') : 'account';
     function failShow(e) {
       st.busy = false;
       if (deadAccount(e)) { render(); return; }
@@ -1083,18 +1240,25 @@
       friends.rows.forEach(function (r) { if (r.uid === st.arg) cf = r; });
       var other = st.arg;
       box.querySelector('h2').textContent = 'ЧАТ: ' + (cf ? cf.nick.toUpperCase() : 'ДРУГ');
+      if (!(sess.uid in muteState)) { muteState[sess.uid] = null; fetchMute(sess.uid); }
+      var iAmMuted = !!muteState[sess.uid];
       var list = el('div', { style: 'height:150px;overflow:auto;text-align:left;background:#0f0a1a;border:2px solid #4e3e6c;padding:6px;margin:4px 0;font-size:13px;line-height:1.35' });
       var ci = el('input', { type: 'text', placeholder: 'Сообщение…', maxlength: '200', autocomplete: 'off', spellcheck: 'false' });
       var rc = el('div', { 'class': 'row' });
       var bsend = el('button', { 'class': 'main' }, 'ОТПРАВИТЬ'), bback = el('button', {}, 'ЗАКРЫТЬ');
       rc.appendChild(bsend); rc.appendChild(bback);
       box.appendChild(list); box.appendChild(ci); box.appendChild(rc); box.appendChild(msg);
+      if (iAmMuted) {
+        ci.disabled = true; bsend.disabled = true;
+        box.insertBefore(el('p', { style: 'color:#ff8a9a' }, 'Тебя заблокировали в чате.'), list);
+      }
       var shown = null;
       function paint(rows) {
         var key = rows.map(function (m) { return m.id; }).join(',');
         if (key === shown) return;
         shown = key; list.innerHTML = '';
         if (!rows.length) list.appendChild(el('div', { style: 'color:#9a8fb8;text-align:center;margin-top:50px' }, 'Пока пусто — напиши первым!'));
+        if (rows.length) markSeen(other, rows[rows.length - 1].id);
         rows.forEach(function (m) {
           var mine = m.from === sess.uid;
           var line = el('div', { style: 'margin:2px 0;word-break:break-word' });
@@ -1111,7 +1275,7 @@
         });
       }
       function send() {
-        if (st.busy || !ci.value.trim()) return;
+        if (st.busy || iAmMuted || !ci.value.trim()) return;
         st.busy = true; var v = ci.value;
         sendChat(other, v).then(function () { st.busy = false; ci.value = ''; pull(); }, function (e) {
           st.busy = false; msg.className = 'msg'; msg.textContent = human(e);
@@ -1120,6 +1284,7 @@
       bsend.onclick = send;
       ci.onkeydown = function (e) { if (e.key === 'Enter') send(); };
       bback.onclick = function () { chatStop(); st.mode = 'friend'; render(); };
+      chatStop();                    // на случай повторного render() в этом же режиме чата
       pull();
       chatTimer = setInterval(pull, 3000);
       return;
@@ -1133,7 +1298,10 @@
       ri.appendChild(bok); box.appendChild(ri);
       bok.onclick = function () {
         var items = inboxItems; inboxItems = [];
-        items.forEach(function (m) { if (m.id) dbRoot('DELETE', '/inbox/' + sess.uid + '/' + m.id).catch(function () {}); });
+        items.forEach(function (m) {
+          if (m.bc) lsSet('oliver_bc', m.bc);
+          if (m.id && sess) dbRoot('DELETE', '/inbox/' + sess.uid + '/' + m.id).catch(function () {});
+        });
         hide();
       };
       return;
@@ -1153,6 +1321,10 @@
         box.appendChild(inN); box.appendChild(inS); box.appendChild(inB);
         var rA = el('div', { 'class': 'row' }), bSave = el('button', { 'class': 'main' }, 'СОХРАНИТЬ'), bDel = el('button', {}, 'УДАЛИТЬ СТРОКУ');
         rA.appendChild(bSave); rA.appendChild(bDel); box.appendChild(rA);
+        if (!(pl.uid in muteState)) { muteState[pl.uid] = null; fetchMute(pl.uid); }
+        var muted = !!muteState[pl.uid];
+        var rB = el('div', { 'class': 'row' }), bMute = el('button', {}, muted ? 'РАЗБЛОКИРОВАТЬ ЧАТ' : 'ЗАБЛОКИРОВАТЬ ЧАТ');
+        rB.appendChild(bMute); box.appendChild(rB);
         box.appendChild(el('p', {}, 'Выдать кассеты и предмет'));
         var inT = el('input', { type: 'text', inputmode: 'numeric', pattern: '[0-9]*', maxlength: '8', placeholder: 'Кассет (сколько накинуть)' });
         var sel = el('select', { style: 'width:100%;box-sizing:border-box;margin:4px 0;padding:8px;font-size:16px;background:#0f0a1a;color:#fff;border:2px solid #4e3e6c;font-family:monospace' });
@@ -1180,20 +1352,53 @@
           var perm = {}; if (sel.value) { var pr = sel.value.split(':'); perm[pr[0]] = parseInt(pr[1], 10); }
           run(function () { return adminGrant(pl.uid, inT.value, perm); }, 'Выдано — игрок получит при входе');
         };
+        bMute.onclick = function () {
+          run(function () { return adminMute(pl.uid, !muted).then(function () { muted = !muted; bMute.textContent = muted ? 'РАЗБЛОКИРОВАТЬ ЧАТ' : 'ЗАБЛОКИРОВАТЬ ЧАТ'; }); },
+              muted ? 'Разблокирован' : 'Заблокирован в чате');
+        };
         bMsg.onclick = function () { run(function () { return adminMessage(pl.uid, inM.value).then(function () { inM.value = ''; }); }, 'Сообщение отправлено'); };
         bCl.onclick = hide;
       }
       return;
     }
     if (mode === 'admindef') {
-      box.querySelector('h2').textContent = 'ПЕСНИ ПО УМОЛЧАНИЮ';
-      box.appendChild(el('p', {}, 'Номер песни из списка «МУЗЫКА» (1–16, 0 — случайная). Получат все, кто сам песню не выбирал.'));
+      box.querySelector('h2').textContent = 'ПЕСНИ ДЛЯ ВСЕХ';
+      box.appendChild(el('p', {}, 'Загрузи свою песню (mp3/ogg до 800 КБ) — она станет доступна всем. Потом назначь её песней по умолчанию: впиши c1, c2… вместо номера.'));
+      var fileIn = el('input', { type: 'file', accept: 'audio/*' });
+      var nameIn = el('input', { type: 'text', maxlength: '40', placeholder: 'Название песни' });
+      box.appendChild(fileIn); box.appendChild(nameIn);
+      var rU = el('div', { 'class': 'row' }), bUp = el('button', { 'class': 'main' }, 'ЗАГРУЗИТЬ ПЕСНЮ');
+      rU.appendChild(bUp); box.appendChild(rU);
+      var songBox = el('div', { style: 'text-align:left;margin:4px 0;font-size:13px' }, 'Песни: загружаю…');
+      box.appendChild(songBox);
+      function paintSongs() {
+        adminSongs().then(function (list) {
+          songBox.innerHTML = '';
+          if (!list.length) { songBox.textContent = 'Своих песен пока нет'; return; }
+          list.forEach(function (x) {
+            var line = el('div', { style: 'display:flex;gap:6px;align-items:center;margin:2px 0' });
+            line.appendChild(el('span', { style: 'flex:1' }, 'c' + x.id + ' — ' + x.name));
+            var bd = el('button', { style: 'flex:none;padding:3px 8px;font-size:12px' }, 'УДАЛИТЬ');
+            bd.onclick = function () { adminDeleteSong(x.id).then(paintSongs, failShow); };
+            line.appendChild(bd); songBox.appendChild(line);
+          });
+        }, function () { songBox.textContent = 'Не удалось получить список'; });
+      }
+      paintSongs();
+      bUp.onclick = function () {
+        if (st.busy) return; st.busy = true; msg.className = 'msg ok'; msg.textContent = 'Загружаю…';
+        adminUploadSong(fileIn.files[0], nameIn.value).then(function (id) {
+          st.busy = false; msg.className = 'msg ok'; msg.textContent = 'Загружено: c' + id; nameIn.value = ''; paintSongs();
+        }, failShow);
+      };
+      box.appendChild(el('p', { style: 'margin-top:10px' }, 'Песня по умолчанию (0 — случайная, 1–16 — встроенная, c1 — своя):'));
       var cur = readJSON('oliver_remote_picks') || {};
       var defs = {};
       [['menu', 'Меню'], ['select', 'Выбор персонажа'], ['game', 'Забег'], ['load', 'Загрузка']].forEach(function (c) {
-        var i = el('input', { type: 'text', inputmode: 'numeric', pattern: '[0-9]*', maxlength: '2', placeholder: c[1] + ' (0–16)' });
-        i.value = cur[c[0]] === undefined ? '' : String(cur[c[0]]);
-        box.appendChild(el('p', { style: 'margin:6px 0 0;text-align:left' }, c[1] + ':')); box.appendChild(i); defs[c[0]] = i;
+        var i = el('input', { type: 'text', maxlength: '5', placeholder: c[1] + ' (0–16 или c1)' });
+        var v = cur[c[0]];
+        i.value = v === undefined ? '' : (typeof v === 'string' ? 'c' + v.slice(2) : String(v));
+        box.appendChild(i); defs[c[0]] = i;
       });
       var rD = el('div', { 'class': 'row' }), bDs = el('button', { 'class': 'main' }, 'СОХРАНИТЬ'), bDr = el('button', {}, 'СБРОСИТЬ');
       rD.appendChild(bDs); rD.appendChild(bDr); box.appendChild(rD);
@@ -1201,41 +1406,64 @@
       bDs.onclick = function () {
         var out = {}, any = false;
         for (var k in defs) {
-          var t = defs[k].value.trim();
+          var t = defs[k].value.trim().toLowerCase();
           if (t === '') continue;
+          if (/^c[0-9]{1,4}$/.test(t)) { out[k] = 'c:' + parseInt(t.slice(1), 10); any = true; continue; }
           var n = parseInt(t, 10);
-          if (!(n >= 0 && n <= 16)) { msg.className = 'msg'; msg.textContent = 'Номер песни — от 0 до 16'; return; }
+          if (!/^[0-9]{1,2}$/.test(t) || !(n >= 0 && n <= 16)) { msg.className = 'msg'; msg.textContent = 'Номер песни: 0–16 или c1, c2…'; return; }
           out[k] = n; any = true;
         }
-        if (!any) { msg.className = 'msg'; msg.textContent = 'Впиши хотя бы один номер'; return; }
+        if (!any) { msg.className = 'msg'; msg.textContent = 'Впиши хотя бы одну песню'; return; }
         adminDefaults(out).then(function () { fetchDefaults(); msg.className = 'msg ok'; msg.textContent = 'Сохранено для всех'; }, failShow);
       };
       bDr.onclick = function () { adminDefaults(null).then(function () { fetchDefaults(); msg.className = 'msg ok'; msg.textContent = 'Сброшено: у всех песни по-старому'; }, failShow); };
       bDc.onclick = function () { st.mode = 'adminpanel'; render(); };
       return;
     }
+    if (mode === 'adminlist') {
+      box.querySelector('h2').textContent = 'ИГРОКИ';
+      var holder = el('div', { style: 'max-height:55vh;overflow:auto;text-align:left;margin:4px 0' });
+      holder.appendChild(el('p', {}, 'Загружаю…'));
+      box.appendChild(holder);
+      var rBk = el('div', { 'class': 'row' }), bBack = el('button', { 'class': 'main' }, 'НАЗАД');
+      rBk.appendChild(bBack); box.appendChild(rBk); box.appendChild(msg);
+      bBack.onclick = function () { st.mode = 'adminpanel'; render(); };
+      adminPlayers().then(function (rows) {
+        holder.innerHTML = '';
+        holder.appendChild(el('p', { style: 'margin:0 0 4px' }, 'Всего игроков: ' + rows.length + '. Тап — открыть игрока.'));
+        rows.forEach(function (r) {
+          var bt = el('button', { style: 'display:block;width:100%;margin:3px 0;text-align:left;padding:8px' }, r.nick + '  —  ' + r.best);
+          bt.onclick = function () { st.mode = 'adminrow'; st.arg = r.uid; render(); };
+          holder.appendChild(bt);
+        });
+      }, function (e) { holder.innerHTML = ''; holder.appendChild(el('p', {}, human(e))); });
+      return;
+    }
     if (mode === 'adminpanel') {
       box.querySelector('h2').textContent = 'АДМИН';
-      box.appendChild(el('p', {}, 'Игрок по ID (шесть цифр) — править рекорд, ник, статус, выдать кассеты и предметы, написать ему. Или тап по игроку в таблице.'));
       var fid = el('input', { type: 'text', inputmode: 'numeric', pattern: '[0-9]*', maxlength: '6', placeholder: 'ID игрока', autocomplete: 'off' });
+      box.appendChild(el('p', {}, 'Игрок по ID (шесть цифр) или из списка:'));
       box.appendChild(fid);
-      var rF = el('div', { 'class': 'row' }), bFind = el('button', { 'class': 'main' }, 'НАЙТИ'), bSongs = el('button', {}, 'ПЕСНИ ПО УМОЛЧАНИЮ');
-      rF.appendChild(bFind); rF.appendChild(bSongs); box.appendChild(rF);
-      box.appendChild(el('p', {}, 'Обнулить рекорды и кассеты ВСЕХ игроков и очистить таблицу (аккаунты и друзья остаются).'));
-      var r3a = el('div', { 'class': 'row' });
-      var bz1 = el('button', {}, 'ОБНУЛИТЬ ВСЁ'), bz2 = el('button', { 'class': 'main' }, 'ЗАКРЫТЬ');
-      r3a.appendChild(bz1); r3a.appendChild(bz2); box.appendChild(r3a); box.appendChild(msg);
+      var rF = el('div', { 'class': 'row' }), bFind = el('button', { 'class': 'main' }, 'НАЙТИ'), bList = el('button', {}, 'СПИСОК ИГРОКОВ');
+      rF.appendChild(bFind); rF.appendChild(bList); box.appendChild(rF);
+      box.appendChild(el('p', {}, 'Сообщение всем игрокам (покажется один раз при запуске):'));
+      var bcIn = el('input', { type: 'text', maxlength: '300', placeholder: 'Текст для всех' });
+      box.appendChild(bcIn);
+      var rBc = el('div', { 'class': 'row' }), bBc = el('button', { 'class': 'main' }, 'ОТПРАВИТЬ ВСЕМ');
+      rBc.appendChild(bBc); box.appendChild(rBc);
+      var rS = el('div', { 'class': 'row' }), bSongs = el('button', {}, 'ПЕСНИ ДЛЯ ВСЕХ'), bz2 = el('button', { 'class': 'main' }, 'ЗАКРЫТЬ');
+      rS.appendChild(bSongs); rS.appendChild(bz2); box.appendChild(rS); box.appendChild(msg);
       bFind.onclick = function () {
         if (st.busy) return; st.busy = true;
         adminFindUid(fid.value).then(function (u) { st.busy = false; st.mode = 'adminrow'; st.arg = u; render(); }, failShow);
       };
+      bList.onclick = function () { st.mode = 'adminlist'; render(); };
       bSongs.onclick = function () { st.mode = 'admindef'; render(); };
-      var arm2 = false;
-      bz1.onclick = function () {
-        if (st.busy) return;
-        if (!arm2) { arm2 = true; bz1.textContent = 'ТОЧНО? ЕЩЁ ТАП'; return; }
-        st.busy = true; msg.className = 'msg ok'; msg.textContent = 'Обнуляю…';
-        adminReset().then(function () { st.busy = false; st.msg = 'Всё обнулено'; st.msgOk = true; hide(); }, failShow);
+      bBc.onclick = function () {
+        if (st.busy) return; st.busy = true;
+        adminBroadcast(bcIn.value).then(function () {
+          st.busy = false; bcIn.value = ''; msg.className = 'msg ok'; msg.textContent = 'Отправлено всем: увидят при следующем запуске игры';
+        }, failShow);
       };
       bz2.onclick = hide;
       return;
@@ -1250,7 +1478,7 @@
       }
       var rr = el('div', { 'class': 'row' });
       var bd = el('button', {}, 'УДАЛИТЬ ИЗ ДРУЗЕЙ'), bk = el('button', {}, 'ЗАКРЫТЬ');
-      var bw = el('button', { 'class': 'main' }, 'НАПИСАТЬ');
+      var bw = el('button', { 'class': 'main' }, unread[st.arg] ? 'НАПИСАТЬ (НОВОЕ)' : 'НАПИСАТЬ');
       var rw = el('div', { 'class': 'row' }); rw.appendChild(bw); box.appendChild(rw);
       rr.appendChild(bd); rr.appendChild(bk); box.appendChild(rr); box.appendChild(msg);
       bw.onclick = function () { st.mode = 'chat'; render(); };
@@ -1388,7 +1616,8 @@
     state: function () {
       return JSON.stringify({ available: true, in: st.in, nick: st.nick, busy: st.busy,
                               rev: st.rev, open: st.open, reset: resetCount, cfg: settingsRev,
-                              req: requests.rows.length, admin: isAdmin(), dp: defaultsRev });
+                              req: requests.rows.length, admin: isAdmin(), dp: defaultsRev, cheat: cheatCount,
+                              msgs: Object.keys(unread).length });
     },
     isOpen: function () { return st.open; },
     board: function () { return JSON.stringify({ state: board.state, rows: board.rows, me: st.nick }); },
@@ -1399,18 +1628,31 @@
     // новый рекорд: в облако уходят только те, что выше уже сохранённых там
     pushScores: function (json) {
       if (!sess) return;
-      var s = {}, up = {}, k;
+      var s = {}, up = {}, safe = {}, k, now = Date.now();
       try { s = JSON.parse(json) || {}; } catch (e) { return; }
-      for (k in s) if ((parseInt(s[k], 10) || 0) > (cloudScores[k] || 0)) up[k] = parseInt(s[k], 10);
+      for (k in s) {
+        var v = parseInt(s[k], 10) || 0, base = cloudScores[k] || 0;
+        safe[k] = base;
+        if (v <= base) continue;
+        var bad = v >= CHEAT_CAP, prev = lastPush[k];
+        if (!bad && prev) {                 // скачок больше теоретически возможного за это время
+          var dt = Math.max(0, (now - prev.t) / 1000);
+          if (v - prev.v > dt * CHEAT_RATE + CHEAT_GRACE) bad = true;
+        }
+        lastPush[k] = { t: now, v: v };
+        if (bad) { cheatCount++; st.rev++; continue; }
+        up[k] = v; safe[k] = v;
+      }
+      pushBoard(safe);                      // в паблик-рекорд не попадает отклонённое значение
       if (!Object.keys(up).length) return;
-      pushBoard(s);
       db('PATCH', '/scores', up).then(function () {
         for (var u in up) cloudScores[u] = up[u];
       }, function () { sync().catch(function () {}); });   // в облаке уже больше — сверимся
     },
     // экран «Лидеры / Друзья / Профиль» в игре
     social: function () {
-      return JSON.stringify({ friends: friends, requests: requests, in: st.in, me: { nick: st.nick, status: myStatus, code: myCode(),
+      var fr2 = { state: friends.state, rows: friends.rows.map(function (r) { var o = {}; for (var k in r) o[k] = r[k]; o.unread = !!unread[r.uid]; return o; }) };
+      return JSON.stringify({ friends: fr2, requests: requests, in: st.in, me: { nick: st.nick, status: myStatus, code: myCode(),
                               best: Math.max(localBest(), boardBest, 0) } });
     },
     fetchFriends: fetchFriends,
@@ -1447,6 +1689,7 @@
 
   checkReset();
   fetchDefaults();
+  fetchBroadcast();
   // уже входил на этом устройстве — тихо подтягиваем облако при запуске
   sess = readJSON(KEY_SESS);
   if (sess && sess.uid && sess.refresh) {
@@ -1455,7 +1698,7 @@
   } else {
     sess = null;
   }
-})();</script><script src="splash/splash.js?v=1790966280"></script><script src="https://pygame-web.github.io/cdn/0.9.3/pythons.js" type=module id="site" data-python="python3.12" data-LINES=42 data-COLUMNS=132 data-os="vtx,snd,gui" async defer>#<!--
+})();</script><script src="splash/splash.js?v=1791214356"></script><script src="https://pygame-web.github.io/cdn/0.9.3/pythons.js" type=module id="site" data-python="python3.12" data-LINES=42 data-COLUMNS=132 data-os="vtx,snd,gui" async defer>#<!--
 
 print("""
 Loading olivertreemobile from olivertreemobile.apk
