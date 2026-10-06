@@ -1,7 +1,4 @@
-<html lang="en-us"><style>html,body{background:#000!important;margin:0}</style><script src="music_data.js?v=1791214356"></script><script>(function () {
-  // pygbag при старте без касания пытается проиграть «пустой» звук и, получив
-  // отказ браузера, показывает alert. Звук мы разблокируем сами по первому
-  // касанию, поэтому это сообщение гасим (остальные alert не трогаем).
+<html lang="en-us"><style>html,body{background:#000!important;margin:0}</style><script src="music_data.js?v=1791261599"></script><script>(function () {
   var nativeAlert = window.alert;
   window.alert = function (msg) {
     if (String(msg).indexOf('Rejection occurred') === 0) {
@@ -18,9 +15,6 @@
     var W = function (o) { var c = o ? new C(o) : new C(); list.push(c); return c; };
     W.prototype = C.prototype; window[n] = W;
   });
-
-  // ---- синтезатор: порт chiptune.render_song (самодостаточная функция:
-  // её текст уходит в Web Worker) --------------------------------------------
   function renderSong(spec, SR, opts) {
     var TARGET_RMS = 0.185;
     var SEMI = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 };
@@ -50,7 +44,6 @@
                          toks(spec.drum).length);
     var total = steps * step;
     var mix = new Float64Array(total);
-
     function tone(pattern, tri, duty, vol, cents) {
       var ev = events(pattern), pos = 0, mul = Math.pow(2, cents / 1200);
       var S = 0.65;
@@ -59,7 +52,6 @@
         if (midi !== null && pos < total) {
           var cnt = Math.min(len, total - pos);
           var inc = (440 * Math.pow(2, (midi - 69) / 12) * mul) / SR;
-          // огибающая — как envelope() в chiptune.py
           var na = Math.min(Math.floor(0.004 * SR), cnt);
           var nd = Math.min(Math.floor(0.06 * SR), cnt - na);
           var nr = Math.min(Math.floor(0.05 * SR), Math.max(0, cnt - na - nd));
@@ -81,8 +73,7 @@
         pos += len;
       }
     }
-
-    function rng(seed) {                  // mulberry32: шум барабанов
+    function rng(seed) {
       var a = seed >>> 0;
       return function () {
         a = (a + 0x6D2B79F5) >>> 0;
@@ -126,15 +117,12 @@
         }
       }
     }
-
     tone(spec.lead, false, dflt(spec.lead_duty, 0.5), dflt(spec.lead_vol, 0.20), 0);
     if (toks(spec.harm).length)
       tone(spec.harm, false, dflt(spec.harm_duty, 0.25), dflt(spec.harm_vol, 0.12),
            dflt(spec.harm_detune, 6.0));
     tone(spec.bass, true, 0, dflt(spec.bass_vol, 0.30), 0);
     if (!(opts && opts.noDrums)) drums(spec.drum, dflt(spec.drum_vol, 0.32), 7);
-
-    // все треки одной громкости: целимся в общий RMS, пик не выше 0.92
     var sum2 = 0, peak = 0, i;
     for (i = 0; i < total; i++) {
       var v = mix[i]; sum2 += v * v;
@@ -149,14 +137,11 @@
     }
     return out;
   }
-
-  // ---- проигрыватель ----------------------------------------------------------
   var SR = 44100;
   var ctx = null, master = null, src = null, srcGain = null, cur = null, want = null;
   var buffers = {}, loading = {}, order = [];
   var level = 1, userPaused = false, bgPaused = false;
   var worker = null, pending = {}, jobId = 0, workerTried = false;
-
   function ensure() {
     if (ctx || !Orig) return !!ctx;
     try {
@@ -167,7 +152,7 @@
     } catch (e) { ctx = null; console.log('OT_MUSIC_ERR ctx ' + e); }
     return !!ctx;
   }
-  function apply() {                 // контекст идёт, только если нет паузы
+  function apply() {
     if (!ctx) return;
     try {
       if (userPaused || bgPaused) {
@@ -177,7 +162,7 @@
       }
     } catch (e) {}
   }
-  function trim() {                  // в памяти не больше трёх треков
+  function trim() {
     while (order.length > 3) {
       var k = order.shift();
       if (k === cur || k === want) { order.push(k); break; }
@@ -198,7 +183,7 @@
         delete pending[d.id];
         if (d.error) job.fail(new Error(d.error)); else job.ok(new Float32Array(d.buf));
       };
-      worker.onerror = function () {   // воркер недоступен: считаем в основном потоке
+      worker.onerror = function () {
         var jobs = pending; pending = {}; worker = null;
         Object.keys(jobs).forEach(function (id) { runMain(jobs[id]); });
       };
@@ -219,7 +204,6 @@
       } else runMain(job);
     });
   }
-  // общие песни, которые загрузил админ: в базе songs/{N} лежит {data: base64}; играем как обычный трек
   function customLoad(name) {
     var C = window.OT_FIREBASE;
     if (!C || !C.databaseURL) return Promise.resolve(null);
@@ -259,12 +243,12 @@
     return loading[name];
   }
   function startSource(name, buf) {
-    if (want !== name) return;       // пока считался, выбрали другой трек
+    if (want !== name) return;
     var now = ctx.currentTime;
     var s = ctx.createBufferSource(), g = ctx.createGain();
     s.buffer = buf; s.loop = true;
     s.connect(g); g.connect(master);
-    var cross = src !== null;        // был трек — плавный переход
+    var cross = src !== null;
     g.gain.value = cross ? 0 : 1;
     s.start(0);
     if (cross) {
@@ -275,7 +259,6 @@
     src = s; srcGain = g; cur = name;
     console.log('OT_MUSIC play ' + name + ' ctx=' + ctx.state);
   }
-
   window.otMusic = {
     failed: false,
     play: function (name) {
@@ -299,13 +282,12 @@
     resume: function () { userPaused = false; apply(); console.log('OT_MUSIC resume'); },
     bgPause: function () { bgPaused = true; apply(); },
     bgResume: function () { bgPaused = false; apply(); },
-    kick: function () { apply(); },  // первый жест пользователя: пробуем запустить
+    kick: function () { apply(); },
     state: function () {
       return JSON.stringify({ cur: cur, want: want, ctx: ctx ? ctx.state : null,
         level: level, userPaused: userPaused, bgPaused: bgPaused,
         loaded: Object.keys(buffers), worker: !!worker, failed: this.failed });
     },
-    // для проверок: считает трек в основном потоке и возвращает выборку
     debug: function (name, noDrums) {
       var pcm = renderSong(window.OT_SONGS[name], SR, { noDrums: !!noDrums });
       var s2 = 0, pk = 0, i;
@@ -315,27 +297,23 @@
       return JSON.stringify({ len: pcm.length, rms: Math.sqrt(s2 / pcm.length), peak: pk, picks: picks });
     }
   };
-
-  // ---- музыка на экране загрузки: играет, пока грузится Python ----------------
   try {
     var cfg = {};
     try { cfg = JSON.parse(localStorage.getItem('oliver_cfg') || '{}') || {}; } catch (e) {}
     var keys = window.OT_LOAD_KEYS || [];
     if (keys.length && window.OT_SONGS) {
-      // нет настроек или они старые (до 1.3, где «случайно» стояло само) —
-      // играет песня по умолчанию; так же решает и игра (_load_cfg)
       var v = parseInt(cfg.mus_load, 10), name;
       if (isNaN(v) || ((parseInt(cfg.ver, 10) || 1) < 2 && v === 0)) {
         v = window.OT_LOAD_DEFAULT || 0;
       }
-      try {                         // песня по умолчанию от админа — если игрок свою не выбирал
+      try {
         var rp = JSON.parse(localStorage.getItem('oliver_remote_picks') || 'null');
         if (rp && !cfg.own_load && v === (window.OT_LOAD_DEFAULT || 0)) {
           if (typeof rp.load === 'number') v = rp.load;
           else if (typeof rp.load === 'string' && /^c:[0-9]+$/.test(rp.load)) name = rp.load;
         }
       } catch (e) {}
-      if (name) { /* общая песня */ }
+      if (name) {  }
       else if (v > 0 && v <= keys.length) name = keys[v - 1];
       else {
         var last = null;
@@ -384,7 +362,6 @@
   var KEY_SESS = 'oliver_acc', KEY_SCORES = 'oliver_scores', KEY_CFG = 'oliver_cfg';
   var st = { available: true, in: false, nick: null, busy: false, msg: '', rev: 0, open: false };
   var sess = null, idToken = null, idUntil = 0, cloudScores = {}, root = null;
-
   function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
   function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
   function lsDel(k) { try { localStorage.removeItem(k); } catch (e) {} }
@@ -439,7 +416,6 @@
       return r.json();
     });
   }
-
   function dbRoot(method, path, body) {
     return token().then(function (t) {
       return fetch(DB + path + '.json?auth=' + encodeURIComponent(t), {
@@ -450,13 +426,9 @@
       return r.json();
     });
   }
-  // таблица лидеров: лучший рекорд игрока (среди всех персонажей) + ник; читать может любой
   var boardBest = -1, board = { state: 'idle', rows: [] }, cloudWallet = {};
   var friends = { state: 'idle', rows: [] }, requests = { state: 'idle', rows: [] }, myStatus = '', resetCount = 0, myId = '', claiming = false;
   var settingsRev = 0, settingsTimer = null, muteState = {};
-  // ---- анти-чит на отправке рекорда: явно нереальное число (вручную исправленный
-  // localStorage) или нереальный скачок с прошлой отправки — не уходят в облако.
-  // CHEAT_RATE щедро выше теоретического максимума очков в секунду в самой игре ----
   var CHEAT_CAP = 100000000, CHEAT_RATE = 1000, CHEAT_GRACE = 10000;
   var lastPush = {}, cheatCount = 0;
   function pushBoard(scores) {
@@ -477,17 +449,12 @@
         var rows = [];
         for (var u in (j || {})) {
           var e = j[u];
-          if (e && typeof e.best === 'number' && e.best > 0 && e.nick) rows.push({ uid: u, nick: String(e.nick), best: e.best, status: String(e.status || '') });
+          if (e && typeof e.best === 'number' && e.best > 0 && e.nick) { var row = { uid: u, nick: String(e.nick), best: e.best, status: String(e.status || '') }; if (u === String(C.adminUid || 'gtmMmK9AMNSoOTDoWjmhYcTmOrh2')) row.admin = true; rows.push(row); }
         }
         rows.sort(function (a, b) { return b.best - a.best; });
         board = { state: 'ok', rows: rows };
       }, function () { board = { state: 'error', rows: [] }; });
   }
-
-  // облако + устройство: рекорды — лучшие из двух, стиль — из облака, если он там есть
-  // Рекорды, кассеты и стиль, что лежат на устройстве, принадлежат аккаунту, под которым их набрали
-  // (oliver_owner). Зашёл другой аккаунт — чужое стирается и в него не попадает. Гостевые данные
-  // (владельца нет) по-прежнему переходят в первый аккаунт, под который вошли.
   function wipeLocal() {
     lsDel(KEY_SCORES); cookieSet(KEY_SCORES, '{}'); lsDel('oliver_wallet');
     var c = readJSON(KEY_CFG);
@@ -524,14 +491,12 @@
       } else if (cfg.looks && Object.keys(cfg.looks).length) {
         jobs.push(db('PUT', '/looks', cfg.looks));
       }
-      if (cloud.nick) {                 // ник как при создании, а не как набрали сейчас
+      if (cloud.nick) {
         sess.nick = st.nick = String(cloud.nick);
         lsSet(KEY_SESS, JSON.stringify(sess));
       } else {
         jobs.push(db('PUT', '/nick', sess.nick));
       }
-      // настройки игры: в облаке уже есть — берём их (профиль едет вместе с игроком),
-      // нет — отправляем настройки этого устройства. Стиль персонажей едет отдельно (looks)
       var lc = readJSON(KEY_CFG) || {};
       if (cloud.settings && typeof cloud.settings === 'object') {
         for (var sk in cloud.settings) if (sk !== 'looks' && sk !== 'ver') lc[sk] = cloud.settings[sk];
@@ -541,7 +506,7 @@
         jobs.push(db('PUT', '/settings', cleanSettings(lc)));
       }
       var cw = cloud.wallet || {};
-      var mw = mergeWallet(readJSON('oliver_wallet') || {}, cw);   // всё только растёт: берём большее
+      var mw = mergeWallet(readJSON('oliver_wallet') || {}, cw);
       lsSet('oliver_wallet', JSON.stringify(mw));
       cloudWallet = cw;
       if (walletGrew(mw, cw)) jobs.push(db('PUT', '/wallet', mw).then(function () { cloudWallet = mw; }));
@@ -550,7 +515,6 @@
       return Promise.all(jobs).then(function () { return applyGrants(); });
     }).then(function () { st.rev++; showInbox(); startUnreadWatch(); fetchBroadcast(); });
   }
-
   var MSG = {
     EMAIL_EXISTS: 'Такой ник уже занят', EMAIL_NOT_FOUND: 'Неверный ник или пароль',
     INVALID_PASSWORD: 'Неверный ник или пароль', INVALID_LOGIN_CREDENTIALS: 'Неверный ник или пароль',
@@ -569,7 +533,6 @@
     if (e instanceof TypeError || /Failed to fetch|NetworkError/.test(code)) code = 'OFFLINE';
     return MSG[code] || ('Ошибка: ' + code);
   }
-
   function login(nick, pass, create) {
     nick = cleanNick(nick);
     if (nick.length < 3 || nick.length > 16) return Promise.reject(fail('NICK_LEN'));
@@ -587,9 +550,6 @@
       return sync();
     });
   }
-  // ---- вход через Google: в браузере — окно Google и возврат на auth.html (тот же
-  // сайт, токен приходит через localStorage); в приложении — системный браузер
-  // и возврат по ссылке olivertree://auth?id_token=... ----
   function b64json(part) {
     try { return JSON.parse(decodeURIComponent(escape(atob(part.replace(/-/g, '+').replace(/_/g, '/'))))); }
     catch (e) { return null; }
@@ -641,9 +601,6 @@
   window.addEventListener('storage', function (e) {
     if (e.key === 'oliver_idt' && e.newValue) { lsDel('oliver_idt'); onGoogleToken(e.newValue); }
   });
-
-  // ---- сброс: номер сброса в облаке (config/resetEpoch) больше сохранённого у игрока ->
-  // рекорды и кассеты на этом устройстве обнуляются, а закрытый аккаунт разлогинивается ----
   function checkReset() {
     fetch(DB + '/config/resetEpoch.json').then(function (r) { return r.ok ? r.json() : null; }).then(function (e) {
       e = parseInt(e, 10);
@@ -662,8 +619,6 @@
     if (/INVALID_REFRESH_TOKEN|USER_NOT_FOUND|TOKEN_EXPIRED|USER_DISABLED/.test(c)) { logout(); return true; }
     return false;
   }
-
-  // ---- кошелёк: кассеты, потраченное и вечные покупки (все числа только растут) ----
   function mergeWallet(a, b) {
     a = a || {}; b = b || {};
     var out = { tapes: Math.max(parseInt(a.tapes, 10) || 0, parseInt(b.tapes, 10) || 0),
@@ -679,8 +634,6 @@
     for (var k in (a.perm || {})) if (a.perm[k] > ((b.perm || {})[k] || 0)) return true;
     return false;
   }
-
-  // ---- настройки игры в облаке ----
   function cleanSettings(c) {
     var o = {}, k;
     for (k in c) if (k !== 'looks' && k !== 'ver' && /^[A-Za-z0-9_]+$/.test(k)) {
@@ -689,11 +642,6 @@
     }
     return o;
   }
-
-  // ---- профиль и друзья ----
-  // числовой ID игрока (шесть цифр) — его друзья вводят вместо длинного кода.
-  // Занимается случайный свободный номер в ids/{номер} = uid (правила базы не дают
-  // перезаписать чужой), и записывается в users/{uid}/numId.
   function myCode() { return myId; }
   function claimId() {
     if (claiming || !sess) return;
@@ -704,7 +652,7 @@
       dbRoot('PUT', '/ids/' + n, sess.uid).then(function () {
         return db('PUT', '/numId', n).then(function () { myId = n; claiming = false; st.rev++; });
       }, function (e) {
-        if (++tries < 12 && !deadAccount(e)) attempt(); else claiming = false;   // занят — берём другой
+        if (++tries < 12 && !deadAccount(e)) attempt(); else claiming = false;
       });
     })();
   }
@@ -714,11 +662,7 @@
     for (k in cloudScores) b = Math.max(b, parseInt(cloudScores[k], 10) || 0);
     return b;
   }
-  // grants/{uid}/{id} пишет только админ (правила), claimed/{uid}/{id} — отметка «получено»,
-  // пишется один раз и только если выдача существует. Кассеты и предметы зачисляются в кошелёк
-  // одним атомарным запросом вместе с отметкой — повторно получить выдачу нельзя.
   var inboxItems = [], defaultsRev = 0, unread = {}, notified = {}, unreadTimer = null;
-  // ---- общее сообщение от админа всем: config/broadcast {id, text, t}; показывается один раз ----
   function fetchBroadcast() {
     fetch(DB + '/config/broadcast.json').then(function (r) { return r.ok ? r.json() : null; }).then(function (d) {
       if (!d || !d.id || !d.text) return;
@@ -728,7 +672,7 @@
       whenReady(showInbox);
     }).catch(function () {});
   }
-  function whenReady(fn) {          // игра ещё грузится — окно не должно вылезти поверх заставки
+  function whenReady(fn) {
     var tries = 0;
     (function tick() {
       if (document.querySelector('canvas') && !document.getElementById('ot-splash')) { setTimeout(fn, 600); return; }
@@ -740,7 +684,6 @@
     if (!text) return Promise.reject(fail('EMPTY'));
     return dbRoot('PUT', '/config/broadcast', { id: String(Date.now()), text: text, t: Date.now() });
   }
-  // ---- сообщения от друзей: раз в полминуты смотрим последнее сообщение каждого чата ----
   function seenKey(u) { return 'oliver_seen_' + pairId(sess.uid, u); }
   function markSeen(u, id) {
     if (!sess || !id) return;
@@ -799,11 +742,10 @@
   function startUnreadWatch() {
     if (unreadTimer) clearInterval(unreadTimer);
     if (liveTimer) clearInterval(liveTimer);
-    unreadTimer = setInterval(checkUnread, 30000);
-    liveTimer = setInterval(livePoll, 15000);
+    unreadTimer = setInterval(checkUnread, 15000);
+    liveTimer = setInterval(livePoll, 8000);
     setTimeout(checkUnread, 4000);
   }
-  // ---- админ: список всех игроков и общие песни ----
   function adminPlayers() {
     return token().then(function (t) {
       return fetch(DB + '/users.json?shallow=true&auth=' + encodeURIComponent(t));
@@ -851,8 +793,43 @@
   function adminDeleteSong(id) {
     return dbRoot('DELETE', '/songmeta/' + id).then(function () { return dbRoot('DELETE', '/songs/' + id); });
   }
+  function userUploadSong(file, name) {
+    if (!sess) return Promise.reject(fail('NOAUTH'));
+    if (!file) return Promise.reject(fail('NOFILE'));
+    if (file.size > 800 * 1024) return Promise.reject(fail('BIGFILE'));
+    name = cleanNick(name || file.name.replace(/\.[^.]+$/, '')).slice(0, 40);
+    if (isAdmin()) return adminUploadSong(file, name);
+    return new Promise(function (ok, bad) {
+      var fr = new FileReader();
+      fr.onload = function () { ok(fr.result); };
+      fr.onerror = function () { bad(fail('NOFILE')); };
+      fr.readAsDataURL(file);
+    }).then(function (url) {
+      var b64 = String(url).split(',')[1] || '';
+      var id = Date.now() + '_' + sess.uid;
+      return dbRoot('PUT', '/pending_songs/' + id, { data: b64, name: name, nick: sess.nick, uid: sess.uid, size: file.size, t: Date.now() });
+    });
+  }
+  function adminPendingSongs() {
+    return fetch(DB + '/pending_songs.json').then(function (r) { return r.ok ? r.json() : null; }).then(function (m) {
+      return Object.keys(m || {}).map(function (id) { return { id: id, name: String(m[id].name || ''), nick: String(m[id].nick || ''), size: m[id].size || 0 }; });
+    });
+  }
+  function adminApproveSong(pendingId) {
+    return dbRoot('GET', '/pending_songs/' + pendingId).then(function (p) {
+      if (!p || !p.data) return Promise.reject(fail('NOFILE'));
+      return adminSongs().then(function (list) {
+        var id = list.reduce(function (m, x) { return Math.max(m, parseInt(x.id, 10) || 0); }, 0) + 1;
+        return dbRoot('PUT', '/songs/' + id, { data: p.data }).then(function () {
+          return dbRoot('PUT', '/songmeta/' + id, { name: p.name || ('Песня ' + id), size: p.size || 0, t: Date.now() });
+        }).then(function () { return dbRoot('DELETE', '/pending_songs/' + pendingId); }).then(function () { return id; });
+      });
+    });
+  }
+  function adminRejectSong(pendingId) {
+    return dbRoot('DELETE', '/pending_songs/' + pendingId);
+  }
   var ITEM_NAMES = { djump: 'двойной прыжок', hp: 'доп. жизнь' };
-  // live = игра уже идёт: выдача зачисляется сразу и показывается уведомлением, а не окном при входе
   function applyGrants(live) {
     return Promise.all([dbRoot('GET', '/grants/' + sess.uid), dbRoot('GET', '/claimed/' + sess.uid)]).then(function (r) {
       var g = r[0] || {}, claimed = r[1] || {};
@@ -882,7 +859,7 @@
       return dbRoot('GET', '/inbox/' + sess.uid).then(function (m) {
         Object.keys(m || {}).sort().forEach(function (id) {
           if (!m[id] || !m[id].text) return;
-          if (live) {                                   // сообщение от админа — тут же уведомлением, и из почты убираем
+          if (live) {
             toast('Сообщение от админа: ' + String(m[id].text).slice(0, 140), 8000);
             dbRoot('DELETE', '/inbox/' + sess.uid + '/' + id).catch(function () {});
           } else inboxItems.push({ id: id, text: String(m[id].text) });
@@ -925,7 +902,6 @@
     if (!text) return Promise.reject(fail('EMPTY'));
     return dbRoot('POST', '/inbox/' + uid, { text: text, t: Date.now() });
   }
-  // песни по умолчанию для всех: config/defaultPicks {menu, select, game, load} (0 — случайная)
   function adminDefaults(picks) {
     return picks ? dbRoot('PUT', '/config/defaultPicks', picks) : dbRoot('DELETE', '/config/defaultPicks');
   }
@@ -935,27 +911,36 @@
       defaultsRev++; st.rev++;
     }).catch(function () {});
   }
-  // ---- админ: uid игрока Kadronina зашит и в правилах базы (там настоящая защита);
-  // здесь он только открывает кнопки. Админ правит рекорды, удаляет строки, обнуляет всё. ----
   function isAdmin() { return !!(sess && sess.uid === String(C.adminUid || 'gtmMmK9AMNSoOTDoWjmhYcTmOrh2')); }
+  var adminUndo = null;
   function adminSet(uid, nick, status, best) {
     best = parseInt(best, 10);
     if (!(best >= 0) || best >= 100000000) return Promise.reject(fail('BAD_NUM'));
     nick = cleanNick(nick);
     if (nick.length < 3 || nick.length > 16) return Promise.reject(fail('NICK_LEN'));
     status = String(status || '').trim().slice(0, 24);
-    var row = { nick: nick, best: best };
-    if (status) row.status = status;
-    return dbRoot('PUT', '/leaderboard/' + uid, row).then(function () { fetchTop(); });
+    return adminLoad(uid).then(function (prev) {
+      adminUndo = { type: 'set', uid: uid, prev: prev };
+      var row = { nick: nick, best: best };
+      if (status) row.status = status;
+      return dbRoot('PUT', '/leaderboard/' + uid, row).then(function () { fetchTop(); });
+    });
   }
   function adminDelete(uid) {
-    return dbRoot('DELETE', '/leaderboard/' + uid).then(function () {
-      return dbRoot('DELETE', '/users/' + uid + '/scores').catch(function () {});
-    }).then(function () { fetchTop(); });
+    return adminLoad(uid).then(function (prev) {
+      adminUndo = { type: 'delete', uid: uid, prev: prev };
+      return dbRoot('DELETE', '/leaderboard/' + uid).then(function () {
+        return dbRoot('DELETE', '/users/' + uid + '/scores').catch(function () {});
+      }).then(function () { fetchTop(); });
+    });
   }
-  // ---- модерация чата: /moderation/{uid}/muted — читать может сам игрок (чтобы увидеть
-  // свою блокировку) и админ, писать — только админ. Правило нужно завести в самой базе:
-  // здесь только кнопка, настоящий запрет шлёт сервер (см. README/комментарий в isAdmin) ----
+  function adminDoUndo() {
+    if (!adminUndo) return Promise.reject(fail('EMPTY'));
+    var u = adminUndo; adminUndo = null;
+    var row = { nick: u.prev.nick, best: u.prev.best };
+    if (u.prev.status) row.status = u.prev.status;
+    return dbRoot('PUT', '/leaderboard/' + u.uid, row).then(function () { fetchTop(); });
+  }
   function fetchMute(uid) {
     return dbRoot('GET', '/moderation/' + uid + '/muted').then(function (v) {
       muteState[uid] = !!v; st.rev++; if (root) render();
@@ -966,7 +951,6 @@
       muteState[uid] = !!muted;
     });
   }
-  // ---- чат с другом: chats/{пара}/{id сообщения} = {from, text, t}; пара = два uid по алфавиту ----
   function pairId(a, b) { return a < b ? a + '_' + b : b + '_' + a; }
   function fetchChat(uid) {
     return token().then(function (t) {
@@ -1014,7 +998,6 @@
       friends = { state: 'ok', rows: rows };
     }, function (e) { if (!deadAccount(e)) friends = { state: 'error', rows: [] }; });
   }
-  // запросы в друзья: requests/{кому}/{от кого} = true. Принять — оба пишут друг друга в friends/
   function fetchRequests() {
     if (!sess) { requests = { state: 'off', rows: [] }; return; }
     requests = { state: 'loading', rows: [] };
@@ -1026,7 +1009,6 @@
     }, function (e) { if (!deadAccount(e)) requests = { state: 'error', rows: [] }; });
   }
   function acceptRequest(uid) {
-    // сначала записываем себя ему (правила разрешают, пока запрос существует), потом его себе
     return dbRoot('PUT', '/friends/' + uid + '/' + sess.uid, true).then(function () {
       return dbRoot('PUT', '/friends/' + sess.uid + '/' + uid, true);
     }).then(function () {
@@ -1051,7 +1033,7 @@
       return friendIds();
     }).then(function (ids) {
       if (ids.indexOf(other) >= 0) throw fail('FR_HAVE');
-      return dbRoot('GET', '/requests/' + sess.uid + '/' + other);      // он уже звал меня?
+      return dbRoot('GET', '/requests/' + sess.uid + '/' + other);
     }).then(function (theirs) {
       if (theirs === true) return acceptRequest(other).then(function () { return friendRow(other).then(function (r) { return { nick: r.nick, mutual: true }; }); });
       return dbRoot('PUT', '/requests/' + other + '/' + sess.uid, true).then(function () {
@@ -1066,10 +1048,6 @@
       db('DELETE', '/friends/' + uid).catch(function () {})
     ]).then(function () { fetchFriends(); });
   }
-
-  // Вход по нику = вход по служебной почте (хэш ника). Поэтому при смене ника меняем и её:
-  // иначе игрок не сможет войти под новым ником, нажмёт «СОЗДАТЬ» и получит второй аккаунт.
-  // Заодно занятый ник отклоняется (почта уже существует). У входа через Google логина-ника нет.
   function changeLogin(nick, pass) {
     return token().then(function (t) {
       return post(AUTH + '/accounts:lookup?key=' + C.apiKey, { idToken: t });
@@ -1078,7 +1056,7 @@
       var pw = (u.providerUserInfo || []).some(function (x) { return x.providerId === 'password'; });
       if (!pw) return null;
       return emailOf(nick).then(function (newEmail) {
-        if (newEmail === u.email) return null;            // тот же ник (регистр не важен)
+        if (newEmail === u.email) return null;
         if (!pass) throw fail('NEED_PW');
         return post(AUTH + '/accounts:signInWithPassword?key=' + C.apiKey,
                     { email: u.email, password: String(pass), returnSecureToken: true })
@@ -1113,7 +1091,6 @@
       st.rev++;
     });
   }
-
   function logout() {
     sess = null; idToken = null; cloudScores = {}; cloudWallet = {}; boardBest = -1; myId = ''; myStatus = '';
     lsDel(KEY_SESS); wipeLocal(); lsDel('oliver_owner'); resetCount++; inboxItems = []; unread = {}; notified = {};
@@ -1122,9 +1099,6 @@
     st.in = false; st.nick = null; st.msg = '';
     st.rev++;
   }
-
-  // ---- окно входа поверх игры (обычные поля ввода — на телефоне сама
-  // всплывает клавиатура) ----
   var CSS = '#ot-acc{position:fixed;left:0;top:0;right:0;bottom:0;z-index:2147483646;display:flex;' +
     'align-items:center;justify-content:center;background:rgba(10,5,18,.74);font-family:monospace}' +
     '#ot-acc .box{background:#1e1430;border:3px solid #fcd63c;box-shadow:0 0 0 3px #000;color:#fafafc;' +
@@ -1141,8 +1115,6 @@
     '#ot-acc button:disabled{opacity:.5}' +
     '#ot-acc .msg{min-height:16px;margin-top:6px;color:#ff8a9a;font-size:13px}' +
     '#ot-acc .ok{color:#7ee08a}' +
-    // клавиатура открыта (поле в фокусе): окно у верхнего края, без пояснений —
-    // иначе в альбомной ориентации клавиатура закрывает поля
     '#ot-acc.kb{align-items:flex-start;padding-top:3px}' +
     '#ot-acc.kb .box{padding:6px 12px 8px}#ot-acc.kb h2{font-size:14px;margin:0 0 2px}' +
     '#ot-acc.kb p{display:none}#ot-acc.kb input{padding:5px 8px;margin:2px 0}' +
@@ -1284,9 +1256,9 @@
       bsend.onclick = send;
       ci.onkeydown = function (e) { if (e.key === 'Enter') send(); };
       bback.onclick = function () { chatStop(); st.mode = 'friend'; render(); };
-      chatStop();                    // на случай повторного render() в этом же режиме чата
+      chatStop();
       pull();
-      chatTimer = setInterval(pull, 3000);
+      chatTimer = setInterval(pull, 2000);
       return;
     }
     if (mode === 'inbox') {
@@ -1359,6 +1331,29 @@
         bMsg.onclick = function () { run(function () { return adminMessage(pl.uid, inM.value).then(function () { inM.value = ''; }); }, 'Сообщение отправлено'); };
         bCl.onclick = hide;
       }
+      return;
+    }
+    if (mode === 'adminpending') {
+      box.querySelector('h2').textContent = 'ПЕСНИ НА ПРОВЕРКУ';
+      var holder = el('div', { style: 'max-height:55vh;overflow:auto;text-align:left;margin:4px 0' });
+      holder.appendChild(el('p', {}, 'Загружаю…'));
+      box.appendChild(holder);
+      var rBk = el('div', { 'class': 'row' }), bBack = el('button', { 'class': 'main' }, 'НАЗАД');
+      rBk.appendChild(bBack); box.appendChild(rBk); box.appendChild(msg);
+      bBack.onclick = function () { st.mode = 'adminpanel'; render(); };
+      adminPendingSongs().then(function (list) {
+        holder.innerHTML = '';
+        if (!list.length) { holder.appendChild(el('p', {}, 'Нет песен на проверке.')); return; }
+        list.forEach(function (x) {
+          var line = el('div', { style: 'display:flex;gap:6px;align-items:center;margin:4px 0;flex-wrap:wrap' });
+          line.appendChild(el('span', { style: 'flex:1;min-width:100px' }, x.name + ' (от ' + x.nick + ')'));
+          var bA = el('button', { style: 'flex:none;padding:3px 8px;font-size:12px' }, 'ОДОБРИТЬ');
+          var bR = el('button', { style: 'flex:none;padding:3px 8px;font-size:12px' }, 'УДАЛИТЬ');
+          bA.onclick = function () { adminApproveSong(x.id).then(function (id) { msg.className = 'msg ok'; msg.textContent = 'Одобрено: c' + id; st.mode = 'adminpending'; render(); }, failShow); };
+          bR.onclick = function () { adminRejectSong(x.id).then(function () { msg.className = 'msg ok'; msg.textContent = 'Удалено'; st.mode = 'adminpending'; render(); }, failShow); };
+          line.appendChild(bA); line.appendChild(bR); holder.appendChild(line);
+        });
+      }, function (e) { holder.innerHTML = ''; holder.appendChild(el('p', {}, human(e))); });
       return;
     }
     if (mode === 'admindef') {
@@ -1459,6 +1454,17 @@
       };
       bList.onclick = function () { st.mode = 'adminlist'; render(); };
       bSongs.onclick = function () { st.mode = 'admindef'; render(); };
+      var rP = el('div', { 'class': 'row' }), bPend = el('button', {}, 'ПЕСНИ НА ПРОВЕРКУ');
+      rP.appendChild(bPend); box.insertBefore(rP, rS);
+      bPend.onclick = function () { st.mode = 'adminpending'; render(); };
+      if (adminUndo) {
+        var rU = el('div', { 'class': 'row' }), bUndo = el('button', { 'class': 'danger' }, 'ОТМЕНИТЬ: ' + adminUndo.prev.nick);
+        rU.appendChild(bUndo); box.insertBefore(rU, rS);
+        bUndo.onclick = function () {
+          if (st.busy) return; st.busy = true; msg.className = 'msg ok'; msg.textContent = 'Отменяю…';
+          adminDoUndo().then(function () { st.busy = false; st.msg = 'Отменено!'; st.msgOk = true; render(); }, failShow);
+        };
+      }
       bBc.onclick = function () {
         if (st.busy) return; st.busy = true;
         adminBroadcast(bcIn.value).then(function () {
@@ -1488,14 +1494,33 @@
       bk.onclick = hide;
       return;
     }
+    if (mode === 'uploadsong') {
+      box.querySelector('h2').textContent = 'ЗАГРУЗИТЬ ПЕСНЮ';
+      box.appendChild(el('p', {}, 'Загрузи mp3/ogg (до 800 КБ). ' + (isAdmin() ? 'Песня сразу станет доступна.' : 'Песня уйдёт на проверку админу.')));
+      var fileIn = el('input', { type: 'file', accept: 'audio/*' });
+      var nameIn = el('input', { type: 'text', maxlength: '40', placeholder: 'Название песни' });
+      box.appendChild(fileIn); box.appendChild(nameIn);
+      var rU = el('div', { 'class': 'row' }), bUp = el('button', { 'class': 'main' }, 'ЗАГРУЗИТЬ'), bBk = el('button', {}, 'НАЗАД');
+      rU.appendChild(bUp); rU.appendChild(bBk); box.appendChild(rU); box.appendChild(msg);
+      bUp.onclick = function () {
+        if (st.busy) return; st.busy = true; msg.className = 'msg ok'; msg.textContent = 'Загружаю…';
+        userUploadSong(fileIn.files[0], nameIn.value).then(function (r) {
+          st.busy = false; msg.className = 'msg ok'; msg.textContent = isAdmin() ? ('Загружено: c' + r) : 'Отправлено на проверку!'; nameIn.value = '';
+        }, failShow);
+      };
+      bBk.onclick = function () { st.mode = 'account'; render(); };
+      return;
+    }
     if (st.in) {
       box.appendChild(el('p', {}, 'Ты вошёл как ' + st.nick + '.'));
       box.appendChild(el('p', {}, 'Рекорды и стиль персонажа хранятся в аккаунте — они общие на сайте и в приложении.'));
       var row = el('div', { 'class': 'row' });
       var out = el('button', {}, 'ВЫЙТИ'), close = el('button', { 'class': 'main' }, 'ГОТОВО');
+      var bSong = el('button', {}, 'ЗАГРУЗИТЬ ПЕСНЮ');
       out.onclick = function () { st.mode = 'logout'; render(); };
       close.onclick = hide;
-      row.appendChild(out); row.appendChild(close);
+      bSong.onclick = function () { st.mode = 'uploadsong'; render(); };
+      row.appendChild(out); row.appendChild(bSong); row.appendChild(close);
       box.appendChild(row); box.appendChild(msg);
       return;
     }
@@ -1542,12 +1567,7 @@
     bClose.onclick = hide;
     pass.onkeydown = function (e) { if (e.key === 'Enter') go(false); };
   }
-  // Окно живёт в отдельном iframe: у игры (SDL) свои обработчики клавиш и касаний на
-  // всей странице, они отбирали фокус у полей ввода и «съедали» набор. В iframe
-  // у окна свой документ, события игры до него не доходят.
   var frame = null, fdoc = null;
-  // при появлении клавиатуры страница меняет размер, и игра в ответ зовёт window.focus() —
-  // фокус слетал с поля ввода. Пока окно открыто, этот вызов ничего не делает.
   var origWindowFocus = window.focus;
   window.focus = function () { if (st.open) return; return origWindowFocus.apply(this, arguments); };
   function show() {
@@ -1565,8 +1585,6 @@
                  '<div id="ot-acc"><div class="box"></div></div>');
       fdoc.close();
       root = fdoc.getElementById('ot-acc');
-      // тёмный фон закрывает окно, только если и нажатие, и отпускание были по фону:
-      // когда окно «подпрыгивает» над клавиатурой, клик по полю не должен его закрыть
       var downOnBg = false;
       ['mousedown', 'touchstart', 'pointerdown'].forEach(function (t) {
         root.addEventListener(t, function (e) { downOnBg = (e.target === root); }, true);
@@ -1587,7 +1605,6 @@
     }
     st.msg = ''; st.msgOk = false;
     render();
-    // пока окно открыто, холст игры не может забрать фокус у полей ввода
     [].forEach.call(document.querySelectorAll('canvas'), function (cv) {
       if (cv.getAttribute('data-ot-tab') === null) cv.setAttribute('data-ot-tab', cv.getAttribute('tabindex') === null ? '-' : cv.getAttribute('tabindex'));
       cv.removeAttribute('tabindex'); cv.inert = true; cv.style.pointerEvents = 'none';
@@ -1595,7 +1612,7 @@
     frame.style.display = 'block';
     root.style.display = 'flex';
     st.open = true;
-    try { frame.contentWindow.focus(); } catch (e) {}      // клавиатура теперь идёт в окно, а не в игру
+    try { frame.contentWindow.focus(); } catch (e) {}
   }
   function hide() {
     chatStop();
@@ -1610,7 +1627,6 @@
     st.open = false;
     try { window.focus(); var cv = document.querySelector('canvas'); if (cv) cv.focus(); } catch (e) {}
   }
-
   window.otAccount = {
     available: true,
     state: function () {
@@ -1625,7 +1641,6 @@
     open: show,
     close: hide,
     googleToken: onGoogleToken,
-    // новый рекорд: в облако уходят только те, что выше уже сохранённых там
     pushScores: function (json) {
       if (!sess) return;
       var s = {}, up = {}, safe = {}, k, now = Date.now();
@@ -1635,7 +1650,7 @@
         safe[k] = base;
         if (v <= base) continue;
         var bad = v >= CHEAT_CAP, prev = lastPush[k];
-        if (!bad && prev) {                 // скачок больше теоретически возможного за это время
+        if (!bad && prev) {
           var dt = Math.max(0, (now - prev.t) / 1000);
           if (v - prev.v > dt * CHEAT_RATE + CHEAT_GRACE) bad = true;
         }
@@ -1643,13 +1658,12 @@
         if (bad) { cheatCount++; st.rev++; continue; }
         up[k] = v; safe[k] = v;
       }
-      pushBoard(safe);                      // в паблик-рекорд не попадает отклонённое значение
+      pushBoard(safe);
       if (!Object.keys(up).length) return;
       db('PATCH', '/scores', up).then(function () {
         for (var u in up) cloudScores[u] = up[u];
-      }, function () { sync().catch(function () {}); });   // в облаке уже больше — сверимся
+      }, function () { sync().catch(function () {}); });
     },
-    // экран «Лидеры / Друзья / Профиль» в игре
     social: function () {
       var fr2 = { state: friends.state, rows: friends.rows.map(function (r) { var o = {}; for (var k in r) o[k] = r[k]; o.unread = !!unread[r.uid]; return o; }) };
       return JSON.stringify({ friends: fr2, requests: requests, in: st.in, me: { nick: st.nick, status: myStatus, code: myCode(),
@@ -1659,7 +1673,6 @@
     fetchRequests: fetchRequests,
     defaults: function () { return lsGet('oliver_remote_picks') || '{}'; },
     openMode: function (mode, arg) { st.mode = mode; st.arg = arg || null; show(); },
-    // настройки изменили: через пару секунд (чтобы не слать на каждый тап) уходят в облако
     pushSettings: function (json) {
       var c;
       try { c = JSON.parse(json); } catch (e) { return; }
@@ -1683,14 +1696,11 @@
       try { l = JSON.parse(json) || {}; } catch (e) { return; }
       db('PUT', '/looks', l).catch(function () {});
     },
-    // для проверок
     _debug: function () { return JSON.stringify({ sess: !!sess, cloudScores: cloudScores }); }
   };
-
   checkReset();
   fetchDefaults();
   fetchBroadcast();
-  // уже входил на этом устройстве — тихо подтягиваем облако при запуске
   sess = readJSON(KEY_SESS);
   if (sess && sess.uid && sess.refresh) {
     st.in = true; st.nick = sess.nick;
@@ -1698,7 +1708,7 @@
   } else {
     sess = null;
   }
-})();</script><script src="splash/splash.js?v=1791214356"></script><script src="https://pygame-web.github.io/cdn/0.9.3/pythons.js" type=module id="site" data-python="python3.12" data-LINES=42 data-COLUMNS=132 data-os="vtx,snd,gui" async defer>#<!--
+})();</script><script src="splash/splash.js?v=1791261599"></script><script src="https://pygame-web.github.io/cdn/0.9.3/pythons.js" type=module id="site" data-python="python3.12" data-LINES=42 data-COLUMNS=132 data-os="vtx,snd,gui" async defer>#<!--
 
 print("""
 Loading olivertreemobile from olivertreemobile.apk
