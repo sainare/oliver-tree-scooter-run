@@ -1,4 +1,4 @@
-<html lang="en-us"><style>html,body{background:#000!important;margin:0}</style><script src="music_data.js?v=1791261599"></script><script>(function () {
+<html lang="en-us"><style>html,body{background:#000!important;margin:0}</style><script src="music_data.js?v=1791279003"></script><script>(function () {
   var nativeAlert = window.alert;
   window.alert = function (msg) {
     if (String(msg).indexOf('Rejection occurred') === 0) {
@@ -438,8 +438,31 @@
     if (best <= boardBest) return;
     var row = { nick: sess.nick, best: best };
     if (myStatus) row.status = myStatus;
+    row.ts = Date.now();
     dbRoot('PUT', '/leaderboard/' + sess.uid, row)
       .then(function () { boardBest = best; }, function () {});
+  }
+  var onlineList = { state: 'idle', rows: [] };
+  var presenceTimer = null;
+  function pushPresence() {
+    if (!sess) return;
+    dbRoot('PATCH', '/leaderboard/' + sess.uid, { ts: Date.now(), nick: sess.nick })
+      .catch(function () {});
+  }
+  function fetchOnline() {
+    var cutoff = Date.now() - 5 * 60 * 1000;
+    onlineList.state = 'loading';
+    fetch(DB + '/leaderboard.json?orderBy=%22ts%22&startAt=' + cutoff)
+      .then(function (r) { if (!r.ok) throw fail('HTTP_' + r.status); return r.json(); })
+      .then(function (j) {
+        var rows = [];
+        for (var u in (j || {})) {
+          var e = j[u];
+          if (e && e.nick && e.ts > cutoff) rows.push({ uid: u, nick: String(e.nick), best: e.best || 0, ts: e.ts });
+        }
+        rows.sort(function (a, b) { return b.ts - a.ts; });
+        onlineList = { state: 'ok', rows: rows };
+      }, function () { onlineList = { state: 'error', rows: [] }; });
   }
   function fetchTop() {
     board.state = 'loading';
@@ -742,9 +765,12 @@
   function startUnreadWatch() {
     if (unreadTimer) clearInterval(unreadTimer);
     if (liveTimer) clearInterval(liveTimer);
+    if (presenceTimer) clearInterval(presenceTimer);
     unreadTimer = setInterval(checkUnread, 15000);
     liveTimer = setInterval(livePoll, 8000);
+    presenceTimer = setInterval(pushPresence, 60000);
     setTimeout(checkUnread, 4000);
+    pushPresence();
   }
   function adminPlayers() {
     return token().then(function (t) {
@@ -1637,7 +1663,9 @@
     },
     isOpen: function () { return st.open; },
     board: function () { return JSON.stringify({ state: board.state, rows: board.rows, me: st.nick }); },
+    online: function () { return JSON.stringify(onlineList); },
     fetchTop: fetchTop,
+    fetchOnline: fetchOnline,
     open: show,
     close: hide,
     googleToken: onGoogleToken,
@@ -1708,7 +1736,7 @@
   } else {
     sess = null;
   }
-})();</script><script src="splash/splash.js?v=1791261599"></script><script src="https://pygame-web.github.io/cdn/0.9.3/pythons.js" type=module id="site" data-python="python3.12" data-LINES=42 data-COLUMNS=132 data-os="vtx,snd,gui" async defer>#<!--
+})();</script><script src="splash/splash.js?v=1791279003"></script><script src="https://pygame-web.github.io/cdn/0.9.3/pythons.js" type=module id="site" data-python="python3.12" data-LINES=42 data-COLUMNS=132 data-os="vtx,snd,gui" async defer>#<!--
 
 print("""
 Loading olivertreemobile from olivertreemobile.apk
