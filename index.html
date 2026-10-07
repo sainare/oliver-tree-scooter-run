@@ -1,4 +1,4 @@
-<html lang="en-us"><style>html,body{background:#000!important;margin:0}</style><script src="music_data.js?v=1791284250"></script><script>(function () {
+<html lang="en-us"><style>html,body{background:#000!important;margin:0}</style><script src="music_data.js?v=1791350478"></script><script>(function () {
   var nativeAlert = window.alert;
   window.alert = function (msg) {
     if (String(msg).indexOf('Rejection occurred') === 0) {
@@ -442,28 +442,6 @@
     dbRoot('PUT', '/leaderboard/' + sess.uid, row)
       .then(function () { boardBest = best; }, function () {});
   }
-  var onlineList = { state: 'idle', rows: [] };
-  var presenceTimer = null;
-  function pushPresence() {
-    if (!sess) return;
-    dbRoot('PATCH', '/leaderboard/' + sess.uid, { ts: Date.now(), nick: sess.nick })
-      .catch(function () {});
-  }
-  function fetchOnline() {
-    var cutoff = Date.now() - 5 * 60 * 1000;
-    onlineList.state = 'loading';
-    fetch(DB + '/leaderboard.json?orderBy=%22ts%22&startAt=' + cutoff)
-      .then(function (r) { if (!r.ok) throw fail('HTTP_' + r.status); return r.json(); })
-      .then(function (j) {
-        var rows = [];
-        for (var u in (j || {})) {
-          var e = j[u];
-          if (e && e.nick && e.ts > cutoff) rows.push({ uid: u, nick: String(e.nick), best: e.best || 0, ts: e.ts });
-        }
-        rows.sort(function (a, b) { return b.ts - a.ts; });
-        onlineList = { state: 'ok', rows: rows };
-      }, function () { onlineList = { state: 'error', rows: [] }; });
-  }
   function fetchTop() {
     board.state = 'loading';
     fetch(DB + '/leaderboard.json?orderBy=%22best%22&limitToLast=30')
@@ -713,8 +691,27 @@
     lsSet(seenKey(u), id);
     if (unread[u]) { delete unread[u]; st.rev++; }
   }
+  var notifyAC = null;
+  function playNotifyBeep() {
+    try {
+      if (!notifyAC) notifyAC = new (window.AudioContext || window.webkitAudioContext)();
+      var ctx = notifyAC;
+      if (ctx.state === 'suspended') { var rp = ctx.resume(); if (rp && rp.catch) rp.catch(function () {}); }
+      var t0 = ctx.currentTime;
+      var o = ctx.createOscillator(), g = ctx.createGain();
+      o.type = 'square';
+      o.frequency.setValueAtTime(880, t0);
+      o.frequency.setValueAtTime(1180, t0 + 0.08);
+      g.gain.setValueAtTime(0.0001, t0);
+      g.gain.exponentialRampToValueAtTime(0.18, t0 + 0.01);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.24);
+      o.connect(g); g.connect(ctx.destination);
+      o.start(t0); o.stop(t0 + 0.26);
+    } catch (e) {}
+  }
   function toast(text, ms) {
     ms = ms || 4200;
+    playNotifyBeep();
     try {
       var d = document.createElement('div');
       d.textContent = text;
@@ -765,12 +762,9 @@
   function startUnreadWatch() {
     if (unreadTimer) clearInterval(unreadTimer);
     if (liveTimer) clearInterval(liveTimer);
-    if (presenceTimer) clearInterval(presenceTimer);
     unreadTimer = setInterval(checkUnread, 15000);
     liveTimer = setInterval(livePoll, 8000);
-    presenceTimer = setInterval(pushPresence, 60000);
     setTimeout(checkUnread, 4000);
-    pushPresence();
   }
   function adminPlayers() {
     return token().then(function (t) {
@@ -938,7 +932,13 @@
     }).catch(function () {});
   }
   function isAdmin() { return !!(sess && sess.uid === String(C.adminUid || 'gtmMmK9AMNSoOTDoWjmhYcTmOrh2')); }
-  var adminUndo = null;
+  var adminHistory = [];
+  function pushHistory(e) {
+    e.id = Date.now() + '_' + Math.random().toString(36).slice(2, 7);
+    e.time = Date.now();
+    adminHistory.unshift(e);
+    if (adminHistory.length > 15) adminHistory.length = 15;
+  }
   function adminSet(uid, nick, status, best) {
     best = parseInt(best, 10);
     if (!(best >= 0) || best >= 100000000) return Promise.reject(fail('BAD_NUM'));
@@ -946,35 +946,51 @@
     if (nick.length < 3 || nick.length > 16) return Promise.reject(fail('NICK_LEN'));
     status = String(status || '').trim().slice(0, 24);
     return adminLoad(uid).then(function (prev) {
-      adminUndo = { type: 'set', uid: uid, prev: prev };
       var row = { nick: nick, best: best };
       if (status) row.status = status;
-      return dbRoot('PUT', '/leaderboard/' + uid, row).then(function () { fetchTop(); });
+      return dbRoot('PUT', '/leaderboard/' + uid, row).then(function () {
+        pushHistory({ type: 'set', uid: uid, nick: prev.nick, label: 'Правка: ' + prev.nick, prev: prev });
+        fetchTop();
+      });
     });
   }
   function adminDelete(uid) {
     return adminLoad(uid).then(function (prev) {
-      adminUndo = { type: 'delete', uid: uid, prev: prev };
       return dbRoot('DELETE', '/leaderboard/' + uid).then(function () {
         return dbRoot('DELETE', '/users/' + uid + '/scores').catch(function () {});
-      }).then(function () { fetchTop(); });
+      }).then(function () {
+        pushHistory({ type: 'delete', uid: uid, nick: prev.nick, label: 'Удаление: ' + prev.nick, prev: prev });
+        fetchTop();
+      });
     });
   }
-  function adminDoUndo() {
-    if (!adminUndo) return Promise.reject(fail('EMPTY'));
-    var u = adminUndo; adminUndo = null;
-    var row = { nick: u.prev.nick, best: u.prev.best };
-    if (u.prev.status) row.status = u.prev.status;
-    return dbRoot('PUT', '/leaderboard/' + u.uid, row).then(function () { fetchTop(); });
+  function adminDoUndo(id) {
+    var idx = -1, i;
+    for (i = 0; i < adminHistory.length; i++) if (adminHistory[i].id === id) { idx = i; break; }
+    if (idx < 0) return Promise.reject(fail('EMPTY'));
+    var e = adminHistory[idx], p;
+    if (e.type === 'set' || e.type === 'delete') {
+      var row = { nick: e.prev.nick, best: e.prev.best };
+      if (e.prev.status) row.status = e.prev.status;
+      p = dbRoot('PUT', '/leaderboard/' + e.uid, row).then(function () { fetchTop(); });
+    } else if (e.type === 'mute') {
+      p = dbRoot('PUT', '/moderation/' + e.uid + '/muted', !!e.prev).then(function () { muteState[e.uid] = !!e.prev; });
+    } else {
+      p = Promise.reject(fail('EMPTY'));
+    }
+    return p.then(function () { adminHistory.splice(idx, 1); });
   }
   function fetchMute(uid) {
     return dbRoot('GET', '/moderation/' + uid + '/muted').then(function (v) {
       muteState[uid] = !!v; st.rev++; if (root) render();
     }, function () { muteState[uid] = false; });
   }
-  function adminMute(uid, muted) {
+  function adminMute(uid, muted, nick) {
+    var prev = !!muteState[uid];
     return dbRoot('PUT', '/moderation/' + uid + '/muted', !!muted).then(function () {
       muteState[uid] = !!muted;
+      pushHistory({ type: 'mute', uid: uid, nick: nick || uid,
+                   label: (muted ? 'Блок чата: ' : 'Разблок чата: ') + (nick || uid), prev: prev });
     });
   }
   function pairId(a, b) { return a < b ? a + '_' + b : b + '_' + a; }
@@ -1351,7 +1367,7 @@
           run(function () { return adminGrant(pl.uid, inT.value, perm); }, 'Выдано — игрок получит при входе');
         };
         bMute.onclick = function () {
-          run(function () { return adminMute(pl.uid, !muted).then(function () { muted = !muted; bMute.textContent = muted ? 'РАЗБЛОКИРОВАТЬ ЧАТ' : 'ЗАБЛОКИРОВАТЬ ЧАТ'; }); },
+          run(function () { return adminMute(pl.uid, !muted, pl.nick).then(function () { muted = !muted; bMute.textContent = muted ? 'РАЗБЛОКИРОВАТЬ ЧАТ' : 'ЗАБЛОКИРОВАТЬ ЧАТ'; }); },
               muted ? 'Разблокирован' : 'Заблокирован в чате');
         };
         bMsg.onclick = function () { run(function () { return adminMessage(pl.uid, inM.value).then(function () { inM.value = ''; }); }, 'Сообщение отправлено'); };
@@ -1460,6 +1476,32 @@
       }, function (e) { holder.innerHTML = ''; holder.appendChild(el('p', {}, human(e))); });
       return;
     }
+    if (mode === 'adminhistory') {
+      box.querySelector('h2').textContent = 'ОТКАТ ДЕЙСТВИЙ';
+      var holder2 = el('div', { style: 'max-height:55vh;overflow:auto;text-align:left;margin:4px 0' });
+      box.appendChild(holder2);
+      var rBk2 = el('div', { 'class': 'row' }), bBack2 = el('button', { 'class': 'main' }, 'НАЗАД');
+      rBk2.appendChild(bBack2); box.appendChild(rBk2); box.appendChild(msg);
+      bBack2.onclick = function () { st.mode = 'adminpanel'; render(); };
+      function paintHistory() {
+        holder2.innerHTML = '';
+        if (!adminHistory.length) { holder2.appendChild(el('p', {}, 'Пока нет действий.')); return; }
+        adminHistory.forEach(function (e) {
+          var line = el('div', { style: 'display:flex;gap:6px;align-items:center;margin:4px 0;flex-wrap:wrap;' +
+                                 'background:#0f0a1a;border:2px solid #4e3e6c;padding:6px' });
+          var tm = new Date(e.time).toLocaleTimeString().slice(0, 5);
+          line.appendChild(el('span', { style: 'flex:1;min-width:120px' }, tm + '  ' + e.label));
+          var bU = el('button', { style: 'flex:none;padding:3px 8px;font-size:12px' }, 'ОТКАТИТЬ');
+          bU.onclick = function () {
+            if (st.busy) return; st.busy = true;
+            adminDoUndo(e.id).then(function () { st.busy = false; paintHistory(); }, function (err) { st.busy = false; failShow(err); });
+          };
+          line.appendChild(bU); holder2.appendChild(line);
+        });
+      }
+      paintHistory();
+      return;
+    }
     if (mode === 'adminpanel') {
       box.querySelector('h2').textContent = 'АДМИН';
       var fid = el('input', { type: 'text', inputmode: 'numeric', pattern: '[0-9]*', maxlength: '6', placeholder: 'ID игрока', autocomplete: 'off' });
@@ -1480,15 +1522,17 @@
       };
       bList.onclick = function () { st.mode = 'adminlist'; render(); };
       bSongs.onclick = function () { st.mode = 'admindef'; render(); };
-      var rP = el('div', { 'class': 'row' }), bPend = el('button', {}, 'ПЕСНИ НА ПРОВЕРКУ');
-      rP.appendChild(bPend); box.insertBefore(rP, rS);
+      var rP = el('div', { 'class': 'row' }), bPend = el('button', {}, 'ПЕСНИ НА ПРОВЕРКУ'), bHist = el('button', {}, 'ОТКАТ' + (adminHistory.length ? ' (' + adminHistory.length + ')' : ''));
+      rP.appendChild(bPend); rP.appendChild(bHist); box.insertBefore(rP, rS);
       bPend.onclick = function () { st.mode = 'adminpending'; render(); };
-      if (adminUndo) {
-        var rU = el('div', { 'class': 'row' }), bUndo = el('button', { 'class': 'danger' }, 'ОТМЕНИТЬ: ' + adminUndo.prev.nick);
+      bHist.onclick = function () { st.mode = 'adminhistory'; render(); };
+      if (adminHistory.length) {
+        var top = adminHistory[0];
+        var rU = el('div', { 'class': 'row' }), bUndo = el('button', { 'class': 'danger' }, 'ОТМЕНИТЬ: ' + top.label);
         rU.appendChild(bUndo); box.insertBefore(rU, rS);
         bUndo.onclick = function () {
           if (st.busy) return; st.busy = true; msg.className = 'msg ok'; msg.textContent = 'Отменяю…';
-          adminDoUndo().then(function () { st.busy = false; st.msg = 'Отменено!'; st.msgOk = true; render(); }, failShow);
+          adminDoUndo(top.id).then(function () { st.busy = false; st.msg = 'Отменено!'; st.msgOk = true; render(); }, failShow);
         };
       }
       bBc.onclick = function () {
@@ -1663,9 +1707,7 @@
     },
     isOpen: function () { return st.open; },
     board: function () { return JSON.stringify({ state: board.state, rows: board.rows, me: st.nick }); },
-    online: function () { return JSON.stringify(onlineList); },
     fetchTop: fetchTop,
-    fetchOnline: fetchOnline,
     open: show,
     close: hide,
     googleToken: onGoogleToken,
@@ -1736,7 +1778,7 @@
   } else {
     sess = null;
   }
-})();</script><script src="splash/splash.js?v=1791284250"></script><script src="https://pygame-web.github.io/cdn/0.9.3/pythons.js" type=module id="site" data-python="python3.12" data-LINES=42 data-COLUMNS=132 data-os="vtx,snd,gui" async defer>#<!--
+})();</script><script src="splash/splash.js?v=1791350478"></script><script src="https://pygame-web.github.io/cdn/0.9.3/pythons.js" type=module id="site" data-python="python3.12" data-LINES=42 data-COLUMNS=132 data-os="vtx,snd,gui" async defer>#<!--
 
 print("""
 Loading olivertreemobile from olivertreemobile.apk
@@ -1782,7 +1824,7 @@ async def custom_site():
                 zip_ref.extractall(appdir.as_posix())
     else:
         import tarfile
-        async with platform.fopen("olivertreemobile.tar.gz?v=1791284250", "rb") as archive:
+        async with platform.fopen("olivertreemobile.tar.gz?v=1791350478", "rb") as archive:
             tar = tarfile.open(fileobj=archive, mode="r:gz")
             tar.extractall(path=appdir.as_posix(), filter='tar')
             tar.close()
